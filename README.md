@@ -1,14 +1,14 @@
 # ViralGenomeEpi
 
-Prototype workflow for viral genome recovery and epidemiological analysis from metagenomic sequencing data.
+Prototype workflow for viral genome recovery and epidemiological analysis from metagenomic sequencing data. Pipeline adapted from https://pubmed.ncbi.nlm.nih.gov/40313286/. The pipeline has been validated with sequencing data from said paper by reproducing viral linkages. 
 
 ## Status
 
-This repository is a research/development pipeline, not a production-ready turnkey package. The scripts are written as workflow steps for a specific computational environment and are designed to be adapted and debugged as needed. Several values are hardcoded to local paths and project-specific accession lists, so you should expect to update configuration before running the pipeline in a new environment.
+This repository is a research/development pipeline, not a production-ready turnkey package. The scripts are written as workflow steps for a specific computational environment and are designed to be adapted and debugged as needed. Several values are hardcoded to local paths and project-specific accession lists. More work needs to be done.
 
 ## Overview
 
-The workflow combines:
+In essence, the pipeline combines:
 
 - read-level taxonomic filtering with Kraken2
 - viral read enrichment and cleaning
@@ -134,7 +134,7 @@ This is still a developmental workflow and not a polished production pipeline. S
 
 ## Recommended workflow for future use
 
-For ongoing development, the next best steps are:
+For ongoing development, I am planning to:
 
 1. convert each script to a common configuration file or CLI options
 2. replace absolute paths with environment variables or config-driven arguments
@@ -146,7 +146,7 @@ For ongoing development, the next best steps are:
 
 ## Minimal handoff guidance
 
-If you are picking this repo up again later, start by checking:
+Immediate tasks:
 
 - the path definitions at the top of each script
 - the accession list in each script
