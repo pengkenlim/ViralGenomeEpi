@@ -157,6 +157,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local project data and generated outputs
+/dependencies/
+/test_data/output/
+/*config*.py
+
 # Spyder project settings
 .spyderproject
 .spyproject

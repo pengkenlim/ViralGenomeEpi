@@ -24,7 +24,7 @@ def get_output_dir(config, sample_name):
     return os.path.join(config.cross_module_params["output_dir"], "module_5", sample_name)
 
 def get_module_3_dir(config, sample_name):
-    return os.path.join(config.cross_module_params["output_dir"], "module_3", "viral", sample_name)
+    return os.path.join(config.cross_module_params["output_dir"], "module_3",  sample_name)
 
 def get_module_4_dir(config, sample_name):
     return os.path.join(config.cross_module_params["output_dir"], "module_4", sample_name)
@@ -32,11 +32,10 @@ def get_module_4_dir(config, sample_name):
 def find_query_assembly(config, sample_name):
     """Return the assembled contigs/scaffolds FASTA for a sample."""
     sample_dir = get_module_3_dir(config, sample_name)
-    candidates = ["scaffolds.fasta", "contigs.fasta", "transcripts.fasta", 
-                  "soft_filtered_transcripts.fasta", "hard_filtered_transcripts.fasta"]
-    for filename in candidates:
-        path = os.path.join(sample_dir, filename)
-        if os.path.exists(path): return path
+
+    path = os.path.join(sample_dir, "combined_transcripts.fasta")
+    if os.path.exists(path):
+        return path
     raise FileNotFoundError(f"No assembly FASTA found for sample {sample_name} in {sample_dir}.")
 
 def get_reference_summary_path(config, sample_name):
@@ -147,8 +146,8 @@ def try_best_slice_extraction(paf_file, query_fasta, ref_length, sample_name, sa
     best_aln = max(alignments, key=lambda x: x['ref_cov_raw'])
     max_ref_cov = best_aln['ref_cov_raw'] / ref_length
 
-    # Trigger fallback if coverage is < 95%
-    if max_ref_cov < 0.95:
+    # Trigger fallback if coverage is < 98%
+    if max_ref_cov < 0.98:
         return None
 
     print(f"[SLICE MODE - {sample_name}{suffix}]: Single contig {best_aln['contig_id']} covers {max_ref_cov*100:.1f}% of reference. Extracting slice...")
@@ -333,8 +332,8 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
             alignments = parse_paf_alignments(paf_file, min_identity=conf["min_identity"])
             coverage = calculate_total_reference_coverage(alignments, ref_length)
             
-            # Accept if Coverage >= 95% AND N-gap <= 5%
-            if coverage >= 0.95 and n_pct <= 5.0:
+            # Accept if Coverage >= 98% AND N-gap <= 5%
+            if coverage >= 0.98 and n_pct <= 2:
                 stitch_result["alignment_mode"] = mode_name
                 if os.path.exists(paf_file): os.remove(paf_file)
                 return stitch_result

@@ -98,6 +98,8 @@ def get_memory_limit(config):
 def get_assembly_output_dir(config, subset_mode, sample_name):
     """Return the output directory for assembly results for one sample and run mode."""
     mode_dir = "viral" if subset_mode == "viral" else "dominant_virus"
+    if config.module_3_params.get("over_assembly", False):
+        mode_dir += "_over_assembly"
     return os.path.join(config.cross_module_params["output_dir"], "module_3", mode_dir, sample_name)
 
 
@@ -122,6 +124,8 @@ def run_rnaviralspades(sample_name, read1, read2, singleton, config, subset_mode
 
     if config.module_3_params.get("use_rna_mode", True):
         cmd.append("--rna")
+    if config.module_3_params.get("over_assembly", False):
+        cmd.append("-k 21,33,55,77,99,127")
 
     if read1 is not None and read2 is not None:
         cmd.extend(["-1", str(read1), "-2", str(read2)])

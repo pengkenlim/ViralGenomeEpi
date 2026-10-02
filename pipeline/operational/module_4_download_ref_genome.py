@@ -28,15 +28,28 @@ def get_ref_genome_dir(config):
     return os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
 
 def get_module_3_dir(config, sample_name):
-    return os.path.join(config.cross_module_params["output_dir"], "module_3", "viral", sample_name)
+    fasta_contents = []
+    for subdir in ["viral", "viral_over_assembly", "dominant_virus", "dominant_virus_over_assembly"]:
+        potential_fasta = os.path.join(config.cross_module_params["output_dir"], "module_3", subdir, sample_name, "transcripts.fasta")
+        if os.path.exists(potential_fasta):
+            with open(potential_fasta, "r") as handle:
+                fasta_contents.append(handle.read())
+    fasta_contents = "\n".join(fasta_contents)
+
+    combined_fasta_path = os.path.join(config.cross_module_params["output_dir"], "module_3", sample_name, "combined_transcripts.fasta")
+    if fasta_contents:
+        os.makedirs(os.path.dirname(combined_fasta_path), exist_ok=True)
+        with open(combined_fasta_path, "w") as handle:
+            handle.write(fasta_contents)
+
+    return os.path.join(config.cross_module_params["output_dir"], "module_3",  sample_name)
 
 def locate_transcripts_file(config, sample_name):
+    #locate and copy the assembled transcript FASTA from module 3
     sample_dir = get_module_3_dir(config, sample_name)
-    candidates = ["transcripts.fasta", "soft_filtered_transcripts.fasta", "hard_filtered_transcripts.fasta"]
-    for filename in candidates:
-        path = os.path.join(sample_dir, filename)
-        if os.path.exists(path):
-            return path
+    path = os.path.join(sample_dir, "combined_transcripts.fasta")
+    if os.path.exists(path):
+        return path
     raise FileNotFoundError(f"No assembled transcript FASTA found for sample {sample_name} in {sample_dir}.")
 
 def get_blast_db_path(config):
@@ -246,7 +259,7 @@ def parse_cd_hit_clusters_and_select_best(clstr_file, blast_tsv_path, seq2genome
                     bitscore = float(parts[5])
                     
                     # Clean the ID to match the genome_map.json format
-                    clean_sseqid = raw_sseqid.replace("ref", "").replace("|", "")
+                    clean_sseqid = raw_sseqid.split("|")[1]
                     
                     if length >= 500 and pident >= 70.0:
                         sseqid_bitscores[clean_sseqid] = sseqid_bitscores.get(clean_sseqid, 0.0) + bitscore
@@ -273,7 +286,7 @@ def parse_cd_hit_clusters_and_select_best(clstr_file, blast_tsv_path, seq2genome
                 if match:
                     raw_seq_id = match.group(1)
                     # Apply the exact same cleaning to ensure it matches the BLAST dictionary keys
-                    clean_seq_id = raw_seq_id.replace("ref", "").replace("|", "")
+                    clean_seq_id = raw_seq_id.split("|")[1]
                     current_cluster.append(clean_seq_id)
                     
     if current_cluster:

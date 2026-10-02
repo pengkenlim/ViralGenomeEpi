@@ -91,6 +91,7 @@ module_3_params = {
     # Which reads to assemble: usually the viral subset or dominant-virus subset.
     "use_rna_mode": True,
     # Enable RNA-mode assembly behavior in the assembler.
+    "over_assembly": False,
 }
 
 
@@ -198,4 +199,33 @@ module_8_params = {
     # Subset of samples to include in this clustering run.
     "analysis_name": "RSV_group1",
     # Output directory name under module_8, e.g. output/module_8/RSV_group1.
+}
+
+
+# ---------------------------------------------------------------------------
+# Module 9: BLAST polished consensus genomes against a separate user-defined DB
+# ---------------------------------------------------------------------------
+module_9_params = {
+    "threads": 32,
+    # Threads used by the BLAST run. This is independent of module 4 and module 6.
+    "blastn_bin_path": "/PATH/TO/blastn",
+    # BLASTN executable used to query the polished genomes from module 6.
+    "blast_db_path": "/PATH/TO/USER_DEFINED_BLAST_DB",
+    # User-defined BLAST database prefix for module 9. For ntcore, the BLAST output itself
+    # already includes the taxid and scientific-name metadata, so no extra lookup is needed.
+    "evalue": 1e-6,
+    # E-value threshold for reporting significant BLAST hits.
+    "max_target_seqs": 20,
+    # Maximum number of target hits to retain per query sequence.
+    "outfmt": "6 qseqid sseqid pident length qlen slen bitscore evalue staxids sscinames stitle",
+    # BLAST tabular output fields used for the per-sample summary table; this must include
+    # staxids and sscinames when using ntcore so taxid/scientific name are captured directly.
+    "input_samples": [
+        "SRR34884124",
+        "SRR34884125",
+        "SRR34884126",
+        "SRR34884127",
+        "SRR34884128",
+    ],
+    # Sample subset to BLAST. If omitted, the default pipeline samples are used.
 }
