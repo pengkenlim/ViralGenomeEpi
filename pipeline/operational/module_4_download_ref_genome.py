@@ -27,22 +27,66 @@ def get_output_dir(config, sample_name):
 def get_ref_genome_dir(config):
     return os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
 
+def _normalize_fasta_header(header, occurrence, total_occurrences):
+    """Append a numerical suffix to duplicate FASTA identifiers.
+
+    For repeated headers, the first occurrence becomes <id>_1, the second
+    <id>_2, and so on. A single occurrence is left unchanged.
+    """
+    header = header.strip()
+    if total_occurrences <= 1:
+        return header
+
+    if " " in header:
+        id_part, suffix_part = header.split(None, 1)
+        return f"{id_part}_{occurrence} {suffix_part}"
+    return f"{header}_{occurrence}"
+
+
 def get_module_3_dir(config, sample_name):
-    fasta_contents = []
+    fasta_records = []
+    seen_counts = {}
+
     for subdir in ["viral", "viral_over_assembly", "dominant_virus", "dominant_virus_over_assembly"]:
         potential_fasta = os.path.join(config.cross_module_params["output_dir"], "module_3", subdir, sample_name, "transcripts.fasta")
-        if os.path.exists(potential_fasta):
-            with open(potential_fasta, "r") as handle:
-                fasta_contents.append(handle.read())
-    fasta_contents = "\n".join(fasta_contents)
+        if not os.path.exists(potential_fasta):
+            continue
 
-    combined_fasta_path = os.path.join(config.cross_module_params["output_dir"], "module_3", sample_name, "combined_transcripts.fasta")
-    if fasta_contents:
+        with open(potential_fasta, "r") as handle:
+            fasta_text = handle.read().strip()
+
+        if not fasta_text:
+            continue
+
+        current_records = []
+        parts = fasta_text.split(">")
+        for part in parts:
+            if not part.strip():
+                continue
+            lines = part.strip().splitlines()
+            if not lines:
+                continue
+            header = lines[0].strip()
+            seq = "".join(line.strip() for line in lines[1:])
+            current_records.append((header, seq))
+            header_id = header.split()[0]
+            seen_counts[header_id] = seen_counts.get(header_id, 0) + 1
+
+        fasta_records.extend(current_records)
+
+    if fasta_records:
+        combined_fasta_path = os.path.join(config.cross_module_params["output_dir"], "module_3", sample_name, "combined_transcripts.fasta")
         os.makedirs(os.path.dirname(combined_fasta_path), exist_ok=True)
-        with open(combined_fasta_path, "w") as handle:
-            handle.write(fasta_contents)
 
-    return os.path.join(config.cross_module_params["output_dir"], "module_3",  sample_name)
+        occurrence_counts = {}
+        with open(combined_fasta_path, "w") as handle:
+            for header, seq in fasta_records:
+                header_id = header.split()[0]
+                occurrence_counts[header_id] = occurrence_counts.get(header_id, 0) + 1
+                final_header = _normalize_fasta_header(header, occurrence_counts[header_id], seen_counts.get(header_id, 1))
+                handle.write(f">{final_header}\n{seq}\n")
+
+    return os.path.join(config.cross_module_params["output_dir"], "module_3", sample_name)
 
 def locate_transcripts_file(config, sample_name):
     #locate and copy the assembled transcript FASTA from module 3
