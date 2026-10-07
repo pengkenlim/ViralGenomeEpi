@@ -136,6 +136,28 @@ def calculate_total_reference_coverage(alignments, ref_length):
 
 
 # =====================================================================
+# ACCEPTANCE THRESHOLDS & ALIGNMENT MODES
+# =====================================================================
+
+# Alignment modes, ordered from most to least stringent.
+ALIGNMENT_MODES = [
+    {"name": "conserved",    "args": ["-c", "-x", "asm5"],         "min_identity": 70.0},
+    {"name": "divergent_70", "args": ["-c", "-k", "14", "-w", "5"], "min_identity": 70.0},
+    {"name": "divergent_60", "args": ["-c", "-k", "14", "-w", "5"], "min_identity": 60.0},
+]
+
+# Slice: a single contiguous block must cover >=98% of the reference;
+# the resulting scaffold may contain at most 5% Ns (mostly terminal padding).
+SLICE_MIN_REF_COVERAGE = 0.98
+SLICE_MAX_N_PCT = 5.0
+
+# Stitch: merged blocks must cover >=98% of the reference and the
+# resulting scaffold may contain at most 2% Ns (stricter: joins are inferred).
+STITCH_MIN_REF_COVERAGE = 0.98
+STITCH_MAX_N_PCT = 2.0
+
+
+# =====================================================================
 # STRATEGY 1: BEST SLICE EXTRACTION (With Terminal Gap-Filling)
 # =====================================================================
 
@@ -146,8 +168,8 @@ def try_best_slice_extraction(paf_file, query_fasta, ref_length, sample_name, sa
     best_aln = max(alignments, key=lambda x: x['ref_cov_raw'])
     max_ref_cov = best_aln['ref_cov_raw'] / ref_length
 
-    # Trigger fallback if coverage is < 98%
-    if max_ref_cov < 0.98:
+    # Trigger fallback if coverage is below the slice threshold
+    if max_ref_cov < SLICE_MIN_REF_COVERAGE:
         return None
 
     print(f"[SLICE MODE - {sample_name}{suffix}]: Single contig {best_aln['contig_id']} covers {max_ref_cov*100:.1f}% of reference. Extracting slice...")
@@ -277,71 +299,118 @@ def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, samp
 # ORCHESTRATOR (6-Tier Fallback Loop)
 # =====================================================================
 
+def build_tier_order(strategy):
+    """Return the evaluation order as a list of (mode_dict, technique) tuples.
+
+    technique_first (default):
+        conserved-slice -> divergent_70-slice -> divergent_60-slice
+        -> conserved-stitch -> divergent_70-stitch -> divergent_60-stitch
+        (Prioritises a single contiguous alignment block over inferred joins.)
+
+    stringency_first (legacy):
+        conserved-slice -> conserved-stitch -> divergent_70-slice
+        -> divergent_70-stitch -> divergent_60-slice -> divergent_60-stitch
+        (Prioritises alignment stringency over scaffolding technique.)
+    """
+    if strategy == "stringency_first":
+        return [(mode, tech) for mode in ALIGNMENT_MODES for tech in ("slice", "stitch")]
+    # Default: technique_first
+    return [(mode, tech) for tech in ("slice", "stitch") for mode in ALIGNMENT_MODES]
+
+
 def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample_dir, segment_id=None):
-    """Orchestrates the 6-tier fallback: 
-    conserved-slice -> conserved-stitch -> divergent(70%)-slice -> divergent(70%)-stitch -> divergent(60%)-slice -> divergent(60%)-stitch.
+    """Orchestrates the 6-tier fallback loop.
+
+    The tier order is controlled by module_5_params["fallback_strategy"]:
+      - "technique_first"  (default): slice at all stringencies, then stitch at all stringencies.
+      - "stringency_first" (legacy):  slice+stitch per stringency, from most to least stringent.
+
+    Minimap2 PAF outputs are cached per alignment mode (lazily), so each mode
+    is aligned at most once regardless of tier order.
     """
     minimap2_bin = resolve_executable_path(config, "minimap2_bin_path")
     suffix = f"_seg_{segment_id}" if segment_id else ""
-    paf_file = os.path.join(sample_dir, f"{sample_name}_minimap2{suffix}.paf")
     ref_length = sum(len(record.seq) for record in SeqIO.parse(ref_fasta, "fasta"))
 
-    # The 3 alignment configurations. Each will attempt Slice, then Stitch.
-    configs = [
-        {"name": "conserved", "args": ["-c", "-x", "asm5"], "min_identity": 70.0},
-        {"name": "divergent_70", "args": ["-c", "-k", "14", "-w", "5"], "min_identity": 70.0},
-        {"name": "divergent_60", "args": ["-c", "-k", "14", "-w", "5"], "min_identity": 60.0},
-    ]
+    strategy = get_config_value(config, "fallback_strategy", "technique_first")
+    tier_order = build_tier_order(strategy)
+    print(f"[SCAFFOLDING - {sample_name}{suffix}]: Strategy = {strategy}. Tier order: "
+          + " -> ".join(f"{m['name']}-{t}" for m, t in tier_order))
 
-    for conf in configs:
-        mode_name = conf["name"]
-        print(f"[MINIMAP2 - {sample_name}{suffix}]: Running in {mode_name} mode...")
-        
-        subprocess.run(
-            [minimap2_bin] + conf["args"] + ["-o", paf_file, ref_fasta, query_fasta],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        
-        if not os.path.exists(paf_file) or os.path.getsize(paf_file) == 0:
-            print(f"[MINIMAP2 - {sample_name}{suffix}]: No alignments found in {mode_name} mode.")
-            continue
-            
-        # --- TRY SLICE ---
-        slice_result = try_best_slice_extraction(paf_file, query_fasta, ref_length, sample_name, sample_dir, suffix, min_identity=conf["min_identity"])
-        if slice_result:
-            seq = str(next(SeqIO.parse(slice_result["scaffold_fasta"], "fasta")).seq)
-            n_count = seq.upper().count('N')
-            n_pct = (n_count / len(seq) * 100) if len(seq) > 0 else 100.0
-            
-            # Accept if N-gap <= 5%
-            if n_pct <= 5.0:
-                slice_result["alignment_mode"] = mode_name
-                if os.path.exists(paf_file): os.remove(paf_file)
-                return slice_result
-            else:
-                print(f"[SLICE FAIL - {sample_name}{suffix}]: {mode_name} slice has {n_pct:.1f}% Ns (>5%). Discarding and trying stitch.")
-                os.remove(slice_result["scaffold_fasta"])
-                
-        # --- TRY STITCH ---
-        stitch_result = stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, sample_dir, suffix, min_identity=conf["min_identity"])
-        if stitch_result:
-            seq = str(next(SeqIO.parse(stitch_result["scaffold_fasta"], "fasta")).seq)
-            n_count = seq.upper().count('N')
-            n_pct = (n_count / len(seq) * 100) if len(seq) > 0 else 100.0
-            
-            alignments = parse_paf_alignments(paf_file, min_identity=conf["min_identity"])
-            coverage = calculate_total_reference_coverage(alignments, ref_length)
-            
-            # Accept if Coverage >= 98% AND N-gap <= 5%
-            if coverage >= 0.98 and n_pct <= 2:
-                stitch_result["alignment_mode"] = mode_name
-                if os.path.exists(paf_file): os.remove(paf_file)
-                return stitch_result
-            else:
-                print(f"[STITCH FAIL - {sample_name}{suffix}]: {mode_name} stitch has {coverage*100:.1f}% coverage and {n_pct:.1f}% Ns (>5%). Discarding.")
-                os.remove(stitch_result["scaffold_fasta"])
+    paf_cache = {}
 
-    raise RuntimeError(f"All 6 alignment/scaffolding strategies failed for {sample_name}{suffix}.")
+    def get_paf(mode):
+        """Lazily run minimap2 for an alignment mode and cache the PAF path."""
+        if mode["name"] not in paf_cache:
+            paf_file = os.path.join(sample_dir, f"{sample_name}_minimap2{suffix}_{mode['name']}.paf")
+            print(f"[MINIMAP2 - {sample_name}{suffix}]: Running in {mode['name']} mode...")
+            subprocess.run(
+                [minimap2_bin] + mode["args"] + ["-o", paf_file, ref_fasta, query_fasta],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            paf_cache[mode["name"]] = paf_file
+        return paf_cache[mode["name"]]
+
+    try:
+        for tier_idx, (mode, technique) in enumerate(tier_order, start=1):
+            mode_name = mode["name"]
+            paf_file = get_paf(mode)
+
+            if not os.path.exists(paf_file) or os.path.getsize(paf_file) == 0:
+                print(f"[TIER {tier_idx}/6 - {mode_name}-{technique}]: No alignments found. Skipping.")
+                continue
+
+            if technique == "slice":
+                result = try_best_slice_extraction(
+                    paf_file, query_fasta, ref_length, sample_name, sample_dir, suffix,
+                    min_identity=mode["min_identity"]
+                )
+                if not result:
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: No single contig covers "
+                          f">= {SLICE_MIN_REF_COVERAGE*100:.0f}% of reference. Skipping.")
+                    continue
+
+                seq = str(next(SeqIO.parse(result["scaffold_fasta"], "fasta")).seq)
+                n_pct = (seq.upper().count('N') / len(seq) * 100) if seq else 100.0
+
+                if n_pct <= SLICE_MAX_N_PCT:
+                    result["alignment_mode"] = mode_name
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: ACCEPTED ({n_pct:.1f}% Ns).")
+                    return result
+                else:
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: REJECTED ({n_pct:.1f}% Ns > {SLICE_MAX_N_PCT}%). Discarding.")
+                    os.remove(result["scaffold_fasta"])
+
+            else:  # stitch
+                result = stitch_contigs_from_paf(
+                    paf_file, query_fasta, ref_length, sample_name, sample_dir, suffix,
+                    min_identity=mode["min_identity"]
+                )
+                if not result:
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: No stitchable alignments. Skipping.")
+                    continue
+
+                seq = str(next(SeqIO.parse(result["scaffold_fasta"], "fasta")).seq)
+                n_pct = (seq.upper().count('N') / len(seq) * 100) if seq else 100.0
+                alignments = parse_paf_alignments(paf_file, min_identity=mode["min_identity"])
+                coverage = calculate_total_reference_coverage(alignments, ref_length)
+
+                if coverage >= STITCH_MIN_REF_COVERAGE and n_pct <= STITCH_MAX_N_PCT:
+                    result["alignment_mode"] = mode_name
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: ACCEPTED "
+                          f"({coverage*100:.1f}% coverage, {n_pct:.1f}% Ns).")
+                    return result
+                else:
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: REJECTED "
+                          f"({coverage*100:.1f}% coverage, {n_pct:.1f}% Ns). Discarding.")
+                    os.remove(result["scaffold_fasta"])
+
+        raise RuntimeError(f"All 6 alignment/scaffolding strategies failed for {sample_name}{suffix}.")
+    finally:
+        # Always clean up cached PAF files, on success or failure
+        for cached_paf in paf_cache.values():
+            if os.path.exists(cached_paf):
+                os.remove(cached_paf)
 
 
 def run_checkv_qc(config, target_fasta, checkv_dir):
