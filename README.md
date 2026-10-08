@@ -14,7 +14,7 @@ Research pipeline, not a turnkey package. The **operational pipeline** in [pipel
 | 2 | `module_2_classify_scrub.py` | Kraken2 classification; split into non-viral, viral, viral + unclassified and dominant-virus read sets |
 | 3 | `module_3_assembly.py` | rnaviralSPAdes assembly of the selected read subset |
 | 4 | `module_4_download_ref_genome.py` | BLAST + cd-hit-est reference selection, taxonomy resolution, segmented-virus detection, NCBI genome download |
-| 5 | `module_5_scaffold_qc.py` | minimap2 reference-guided scaffolding (6-tier slice/stitch fallback) and CheckV QC |
+| 5 | `module_5_scaffold_qc.py` | minimap2 reference-guided scaffolding (6-tier slice/stitch fallback), optional contig exclusion before scaffolding, and CheckV QC |
 | 6 | `module_6_consensus_polish.py` | read re-mapping and iVar consensus (strict then relaxed pass), CheckV QC |
 | 7 | `module_7_tree_build.py` | MAFFT alignment, end trimming, FastTree phylogeny |
 | 8 | `module_8_snpsites_hcluster.py` | snp-sites, pairwise SNP distances, hierarchical clustering at a SNP cutoff |

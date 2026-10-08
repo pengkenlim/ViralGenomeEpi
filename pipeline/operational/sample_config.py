@@ -132,6 +132,11 @@ module_5_params = {
     # Directory containing the CheckV reference database.
     "minimap2_bin_path": "/PATH/TO/minimap2-2.31_x64-linux/minimap2",
     # Minimap2 executable used for read mapping and scaffold validation.
+    "exclude_contigs": {
+        # Optional per-sample contigs to ignore when building the scaffold.
+        # "sampleA": ["contigname_1", "contigname_2"],
+    },
+    # Dictionary keyed by sample accession. Any matching contig IDs are dropped before alignment/scaffolding.
 }
 
 

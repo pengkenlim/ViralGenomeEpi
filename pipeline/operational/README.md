@@ -20,7 +20,7 @@ Placeholders such as `/PATH/TO/...` and the empty `output_dir` must be filled in
 | 2 | `Kraken2_k2_bin_path`, `kraken2_db_path`, `scope_to_keep_taxId` (10239 = Viruses), `threads` |
 | 3 | `rnaviralspades_bin_path`, `reads_subset` (`viral` or `dominant_virus`), `use_rna_mode`, `over_assembly`, `memory` (passed to SPAdes `-m`, GB), `threads` |
 | 4 | `blastn_bin_path`, `blastdbcmd_bin_path`, `cd_hit_est_bin_path`, `blast_db_path`, `seq2genome_map_path`, `assembly_data_report_path`, `nodes_path`, `names_path`, `threads` |
-| 5 | `checkv_bin_path`, `checkv_db_dir`, `minimap2_bin_path`, optional `fallback_strategy` (`technique_first` default, or `stringency_first`), `threads` |
+| 5 | `checkv_bin_path`, `checkv_db_dir`, `minimap2_bin_path`, optional `fallback_strategy` (`technique_first` default, or `stringency_first`), optional `exclude_contigs` (per-sample contig IDs to ignore before scaffolding), `threads` |
 | 6 | `minimap2_bin_path`, `samtools_bin_path`, `ivar_bin_path`, `checkv_bin_path`, `checkv_db_dir`, `threads` |
 | 7 | `mafft_bin_path`, `fasttree_bin_path`, `input_samples`, `analysis_name`, `threads` |
 | 8 | `snpsites_bin_path`, `snp_cutoff` (default 3), `linkage_method` (SciPy; `single` in the template), `input_samples`, `analysis_name`, `threads` |
@@ -34,7 +34,7 @@ Placeholders such as `/PATH/TO/...` and the empty `output_dir` must be filled in
 | 2 | [module_2_classify_scrub.py](module_2_classify_scrub.py) | Kraken2 classification (`k2 classify`); splits reads into non-viral, viral, viral + unclassified, and dominant-virus + unclassified sets | `module_2/<sample>/<sample>_{non_viral,viral,viral_plus_unclassified,dominant_virus_plus_unclassified}_{R1,R2,singleton}.fastq`, `module_2/read_classification_report.tsv` |
 | 3 | [module_3_assembly.py](module_3_assembly.py) | De novo assembly with rnaviralSPAdes on the chosen read subset | `module_3/viral/<sample>/` or `module_3/dominant_virus/<sample>/` (`_over_assembly` suffix when `over_assembly` is on) |
 | 4 | [module_4_download_ref_genome.py](module_4_download_ref_genome.py) | BLASTs transcripts against the viral RefSeq DB, clusters hits (cd-hit-est, 80% identity), picks the best reference by aggregated bitscore (hits ≥500 bp and ≥70% identity), resolves taxonomy, detects segmented viruses, and downloads the genome from the NCBI Datasets API | `module_4/<sample>/<sample>_reference_summary.json`, `selected_reference_<acc>.fasta`, `module_4/ref_genomes/`, `module_4/Identified_species.tsv` |
-| 5 | [module_5_scaffold_qc.py](module_5_scaffold_qc.py) | Reference-guided scaffolding with minimap2 using a 6-tier fallback (see below), then CheckV QC; handles segmented viruses per segment | `module_5/<sample>/<sample>[_seg_<id>]_scaffold.fasta`, `<sample>_scaffold_checkv_report.txt`, `module_5/Identified_scaffolds.tsv` |
+| 5 | [module_5_scaffold_qc.py](module_5_scaffold_qc.py) | Reference-guided scaffolding with minimap2 using a 6-tier fallback (see below), optional per-sample contig exclusion, then CheckV QC; handles segmented viruses per segment | `module_5/<sample>/<sample>[_seg_<id>]_scaffold.fasta`, `<sample>_scaffold_checkv_report.txt`, `<sample>_stitch_contig_locations.tsv` (for stitched scaffolds), `module_5/Identified_scaffolds.tsv` |
 | 6 | [module_6_consensus_polish.py](module_6_consensus_polish.py) | Maps reads back to the scaffold (minimap2 + samtools) and calls consensus with iVar in a strict then relaxed pass, then CheckV QC | `module_6/<sample>/<sample>_consensus_combined.fasta`, `*_aligned_sorted.bam`, `*_ivar_polished_report.txt`, `module_6/Identified_consensus.tsv` |
 | 7 | [module_7_tree_build.py](module_7_tree_build.py) | Combines polished genomes, aligns with MAFFT, trims terminal gap/N columns, builds a FastTree tree | `module_7/<analysis_name>/polished_genomes_{combined,aligned,aligned_trimmed}.fasta`, `polished_genomes_tree.nwk`, `analysis_metadata.json` |
 | 8 | [module_8_snpsites_hcluster.py](module_8_snpsites_hcluster.py) | Subsets the trimmed alignment, extracts SNPs with snp-sites, computes pairwise SNP distances, hierarchical clustering at `snp_cutoff` | `module_8/<analysis_name>/variants.vcf`, `snp_alignment.fasta`, `pairwise_snp_matrix.csv`, `pairwise_snp_pairs.csv`, `pairwise_snp_histogram.png`, `hierarchical_clustering_dendrogram.png`, `analysis_metadata.json` |
@@ -50,6 +50,19 @@ Three minimap2 modes (`conserved`: `-c -x asm5`, ≥70% identity; `divergent_70`
 - **stitch**: merged blocks covering ≥98% of the reference, scaffold ≤2% Ns
 
 `technique_first` (default) tries slice at all three modes, then stitch at all three. `stringency_first` tries slice then stitch per mode. The first accepted tier wins and is recorded as `alignment_mode` in `Identified_scaffolds.tsv`.
+
+You can also exclude problematic contigs from scaffolding on a per-sample basis with `module_5_params["exclude_contigs"]`:
+
+```python
+module_5_params = {
+    "exclude_contigs": {
+        "sampleA": ["contigname_1", "contigname_2"],
+        "sampleB": ["bad_contig_7"],
+    }
+}
+```
+
+Any contig ID listed for a sample is removed before alignment/scaffolding. For stitched scaffolds, the script additionally writes a TSV of the reference coordinates contributed by each stitched contig (`<sample>_stitch_contig_locations.tsv`) to help trace which genomic interval each contig contributed to the final scaffold.
 
 ### Module 6 iVar passes
 

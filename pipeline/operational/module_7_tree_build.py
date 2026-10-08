@@ -61,11 +61,31 @@ def get_module_7_dir(config):
     return os.path.join(config.cross_module_params["output_dir"], "module_7", analysis_name)
 
 
+def get_module_4_ref_genomes_dir(config):
+    return os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
+
+
 def get_input_samples(config):
     samples = get_config_value(config, "module_7_params", "input_samples", None)
     if samples:
         return list(samples)
     return list(config.cross_module_params.get("samples", []))
+
+
+def get_msa_reference(config):
+    """Return the configured MSA reference (accession or FASTA path), or None.
+
+    Config example:
+        module_7_params = {
+            ...
+            "msa_reference": "GCF_000856445.1",   # set to None (or omit) to skip the ref tree
+        }
+    """
+    for key in ("msa_reference", "msa_ref", "MSA_reference"):
+        value = get_config_value(config, "module_7_params", key, None)
+        if value:
+            return str(value).strip()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -103,10 +123,48 @@ def find_polished_fasta(config, sample_name):
 
 
 # ---------------------------------------------------------------------------
-# MAFFT / FastTree workflow
+# MSA reference discovery
 # ---------------------------------------------------------------------------
 
-def run_mafft_alignment(input_fasta, aligned_fasta, threads):
+def resolve_msa_reference_fasta(config, reference):
+    """Locate the FASTA file for the configured MSA reference."""
+    # 1) Direct path to a FASTA file
+    if os.path.isfile(reference):
+        return reference
+
+    # 2) Module 4 ref_genomes directory (standard pipeline location)
+    ref_dir = get_module_4_ref_genomes_dir(config)
+    for ext in (".fasta", ".fa", ".fna"):
+        candidate = os.path.join(ref_dir, f"{reference}{ext}")
+        if os.path.isfile(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        f"MSA reference FASTA not found for '{reference}'. Expected a direct path or a file at "
+        f"{os.path.join(ref_dir, reference + '.fasta')}."
+    )
+
+
+def load_reference_record(config, reference):
+    """Load the MSA reference as a single SeqRecord labelled with its accession."""
+    fasta_path = resolve_msa_reference_fasta(config, reference)
+    records = list(SeqIO.parse(fasta_path, "fasta"))
+    if not records:
+        raise FileNotFoundError(f"MSA reference FASTA contains no records: {fasta_path}")
+    if len(records) > 1:
+        print(f"[WARN]: MSA reference FASTA contains {len(records)} records; using the first.")
+
+    record = records[0]
+    record.id = reference.replace(" ", "_")
+    record.description = ""
+    return record, fasta_path
+
+
+# ---------------------------------------------------------------------------
+# MAFFT / trimming / FastTree workflow
+# ---------------------------------------------------------------------------
+
+def run_mafft_alignment(config, input_fasta, aligned_fasta, threads):
     mafft_bin = resolve_executable_path(config, "mafft_bin_path")
     print(f"[MAFFT]: Running multiple sequence alignment with {threads} threads...")
     cmd = [mafft_bin, "--auto", "--thread", str(threads), input_fasta]
@@ -149,7 +207,7 @@ def trim_alignment_ends(alignment_file, trimmed_file):
     )
 
 
-def run_fasttree_phylogeny(trimmed_fasta, tree_output_file):
+def run_fasttree_phylogeny(config, trimmed_fasta, tree_output_file):
     fasttree_bin = resolve_executable_path(config, "fasttree_bin_path")
     print("[FASTTree]: Building the maximum-likelihood phylogenetic tree using the GTR model...")
     cmd = [fasttree_bin, "-nt", "-gtr", trimmed_fasta]
@@ -158,16 +216,34 @@ def run_fasttree_phylogeny(trimmed_fasta, tree_output_file):
     print(f"[SUCCESS]: Tree written to {tree_output_file}")
 
 
+def run_phylogeny_workflow(config, records, output_dir, threads, filenames, label):
+    """Run the full MAFFT -> trim -> FastTree workflow for one set of sequences."""
+    combined_fasta = os.path.join(output_dir, filenames["combined"])
+    aligned_fasta = os.path.join(output_dir, filenames["aligned"])
+    trimmed_fasta = os.path.join(output_dir, filenames["trimmed"])
+    tree_output = os.path.join(output_dir, filenames["tree"])
+
+    SeqIO.write(records, combined_fasta, "fasta")
+    print(f"[INFO][{label}]: Collected {len(records)} sequences into {combined_fasta}")
+
+    run_mafft_alignment(config, combined_fasta, aligned_fasta, threads)
+    trim_alignment_ends(aligned_fasta, trimmed_fasta)
+    run_fasttree_phylogeny(config, trimmed_fasta, tree_output)
+    return tree_output
+
+
 # ---------------------------------------------------------------------------
 # Main workflow
 # ---------------------------------------------------------------------------
 
-def write_analysis_metadata(output_dir, samples, analysis_name):
+def write_analysis_metadata(output_dir, samples, analysis_name, msa_reference=None, ref_tree_built=False):
     metadata_path = os.path.join(output_dir, "analysis_metadata.json")
     payload = {
         "analysis_name": analysis_name,
         "input_samples": samples,
         "module": "module_7_tree_build",
+        "msa_reference": msa_reference,
+        "reference_included_tree": ref_tree_built,
     }
     with open(metadata_path, "w") as handle:
         json.dump(payload, handle, indent=4)
@@ -179,7 +255,6 @@ def main():
     parser.add_argument("--config", required=True, help="Path to the config Python file.")
     args = parser.parse_args()
 
-    global config
     config = load_config(args.config)
 
     input_samples = get_input_samples(config)
@@ -190,6 +265,7 @@ def main():
     threads = int(
         get_config_value(config, "module_7_params", "threads", config.cross_module_params.get("threads", 8))
     )
+    msa_reference = get_msa_reference(config)
 
     output_dir = get_module_7_dir(config)
     os.makedirs(output_dir, exist_ok=True)
@@ -214,20 +290,46 @@ def main():
     if not records:
         raise RuntimeError("No valid consensus FASTA records were available for tree building.")
 
-    combined_fasta = os.path.join(output_dir, "polished_genomes_combined.fasta")
-    SeqIO.write(records, combined_fasta, "fasta")
-    print(f"[INFO]: Collected {len(records)} sequences into {combined_fasta}")
+    # --- Workflow 1: samples only (always runs) ---
+    run_phylogeny_workflow(
+        config,
+        records,
+        output_dir,
+        threads,
+        {
+            "combined": "polished_genomes_combined.fasta",
+            "aligned": "polished_genomes_aligned.fasta",
+            "trimmed": "polished_genomes_aligned_trimmed.fasta",
+            "tree": "polished_genomes_tree.nwk",
+        },
+        label="samples-only",
+    )
 
-    aligned_fasta = os.path.join(output_dir, "polished_genomes_aligned.fasta")
-    run_mafft_alignment(combined_fasta, aligned_fasta, threads)
+    # --- Workflow 2: samples + configured MSA reference (optional outgroup) ---
+    ref_tree_built = False
+    if msa_reference:
+        ref_record, ref_fasta = load_reference_record(config, msa_reference)
+        print(f"[REF]: Including MSA reference '{msa_reference}' from {ref_fasta} as an outgroup.")
+        ref_records = list(records)
+        ref_records.append(ref_record)
+        run_phylogeny_workflow(
+            config,
+            ref_records,
+            output_dir,
+            threads,
+            {
+                "combined": "polished_genomes_ref_combined.fasta",
+                "aligned": "polished_genomes_ref_aligned.fasta",
+                "trimmed": "polished_genomes_aligned_ref_trimmed.fasta",
+                "tree": "polished_genomes_ref_tree.nwk",
+            },
+            label="samples+reference",
+        )
+        ref_tree_built = True
+    else:
+        print("[REF]: No 'msa_reference' configured in module_7_params; skipping reference-included MSA/tree.")
 
-    trimmed_fasta = os.path.join(output_dir, "polished_genomes_aligned_trimmed.fasta")
-    trim_alignment_ends(aligned_fasta, trimmed_fasta)
-
-    tree_output = os.path.join(output_dir, "polished_genomes_tree.nwk")
-    run_fasttree_phylogeny(trimmed_fasta, tree_output)
-
-    write_analysis_metadata(output_dir, input_samples, analysis_name)
+    write_analysis_metadata(output_dir, input_samples, analysis_name, msa_reference, ref_tree_built)
     print("\n[module_7_tree_build] Finished all samples.")
 
 

@@ -71,6 +71,46 @@ def get_fasta_length(fasta_path):
 def get_config_value(config, key, default=None):
     return config.module_5_params.get(key, default)
 
+
+def get_excluded_contigs(config, sample_name):
+    """Return contig IDs to ignore during scaffolding for a specific sample."""
+    raw = get_config_value(config, "exclude_contigs", {})
+    if not isinstance(raw, dict):
+        return []
+    sample_list = raw.get(sample_name, [])
+    if sample_list is None:
+        return []
+    if isinstance(sample_list, str):
+        sample_list = [sample_list]
+    return [str(item) for item in sample_list]
+
+
+def prepare_query_fasta_for_scaffolding(config, sample_name, query_fasta):
+    """Filter out excluded contigs from the assembly used for scaffolding."""
+    excluded = get_excluded_contigs(config, sample_name)
+    if not excluded:
+        return query_fasta
+
+    sample_dir = get_output_dir(config, sample_name)
+    os.makedirs(sample_dir, exist_ok=True)
+    filtered_path = os.path.join(sample_dir, f"{sample_name}_filtered_scaffold_contigs.fasta")
+    kept_records = []
+    for record in SeqIO.parse(query_fasta, "fasta"):
+        if record.id in excluded:
+            print(f"[EXCLUDE CONTIG - {sample_name}]: Ignoring contig '{record.id}' from scaffolding.")
+            continue
+        kept_records.append(record)
+
+    if not kept_records:
+        raise ValueError(
+            f"All contigs were excluded for sample {sample_name} in module_5 exclude_contigs: {excluded}"
+        )
+
+    with open(filtered_path, "w") as handle:
+        SeqIO.write(kept_records, handle, "fasta")
+    return filtered_path
+
+
 def resolve_executable_path(config, key):
     configured = get_config_value(config, key, None)
     if configured is None:
@@ -203,6 +243,21 @@ def try_best_slice_extraction(paf_file, query_fasta, ref_length, sample_name, sa
 # STRATEGY 2: MULTI-CONTIG STITCHING
 # =====================================================================
 
+def write_stitch_contig_locations(sample_name, sample_dir, suffix, contig_locations):
+    """Write a TSV summarising the reference intervals contributed by each stitched contig."""
+    summary_path = os.path.join(sample_dir, f"{sample_name}{suffix}_stitch_contig_locations.tsv")
+    fieldnames = [
+        "order", "contig_id", "reference_start", "reference_end", "query_start", "query_end",
+        "strand", "final_scaffold_start", "final_scaffold_end", "length"
+    ]
+    with open(summary_path, "w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        for entry in contig_locations:
+            writer.writerow({key: entry.get(key, "") for key in fieldnames})
+    return summary_path
+
+
 def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, sample_dir, suffix="", min_identity=70.0):
     alignments = parse_paf_alignments(paf_file, min_identity=min_identity)
     if not alignments:
@@ -251,8 +306,10 @@ def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, samp
 
     contigs_by_id = SeqIO.to_dict(SeqIO.parse(query_fasta, "fasta"))
     scaffold_chunks = []
+    contig_locations = []
     prev_r_end = 0
     used_contigs = []
+    final_offset = 1
 
     for idx, aln in enumerate(resolved):
         contig_id = aln['contig_id']
@@ -261,7 +318,7 @@ def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, samp
 
         contig_record = contigs_by_id[contig_id]
         seq_len = len(contig_record.seq)
-        
+
         q_start_idx = max(0, aln['q_min'] - 1)
         q_end_idx = min(seq_len, aln['q_max'])
 
@@ -270,11 +327,27 @@ def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, samp
 
         if idx == 0 and aln['r_start'] > 1:
             scaffold_chunks.append("N" * (aln['r_start'] - 1))
+            final_offset += aln['r_start'] - 1
         else:
             gap_to_prev = aln['r_start'] - prev_r_end - 1
-            if gap_to_prev > 0: scaffold_chunks.append("N" * gap_to_prev)
+            if gap_to_prev > 0:
+                scaffold_chunks.append("N" * gap_to_prev)
+                final_offset += gap_to_prev
 
         scaffold_chunks.append(clipped_seq)
+        contig_locations.append({
+            "order": len(contig_locations) + 1,
+            "contig_id": contig_id,
+            "reference_start": aln['r_start'],
+            "reference_end": aln['r_end'],
+            "query_start": aln['q_min'],
+            "query_end": aln['q_max'],
+            "strand": aln['strand'],
+            "final_scaffold_start": final_offset,
+            "final_scaffold_end": final_offset + len(clipped_seq) - 1,
+            "length": len(clipped_seq),
+        })
+        final_offset += len(clipped_seq)
         prev_r_end = max(prev_r_end, aln['r_end'])
 
     if prev_r_end < ref_length:
@@ -288,10 +361,13 @@ def stitch_contigs_from_paf(paf_file, query_fasta, ref_length, sample_name, samp
     with open(scaffold_fasta, "w") as handle:
         handle.write(f">{sample_name}{suffix}_scaffold\n{final_sequence}\n")
 
+    location_summary_path = os.path.join(sample_dir, f"{sample_name}{suffix}_stitch_contig_locations.tsv")
     print(f"[STITCH SUCCESS - {sample_name}{suffix}]: Stitched {len(resolved)} contigs into {len(final_sequence)} bp scaffold.")
     return {
         "scaffold_fasta": scaffold_fasta,
-        "scaffold_type": f"Stitched ({', '.join(used_contigs)})"
+        "scaffold_type": f"Stitched ({', '.join(used_contigs)})",
+        "contig_locations": contig_locations,
+        "contig_location_summary": location_summary_path,
     }
 
 
@@ -338,6 +414,7 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
           + " -> ".join(f"{m['name']}-{t}" for m, t in tier_order))
 
     paf_cache = {}
+    accepted_paf = None
 
     def get_paf(mode):
         """Lazily run minimap2 for an alignment mode and cache the PAF path."""
@@ -376,10 +453,18 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
                 if n_pct <= SLICE_MAX_N_PCT:
                     result["alignment_mode"] = mode_name
                     print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: ACCEPTED ({n_pct:.1f}% Ns).")
+                    accepted_paf = paf_file
+                    if "contig_locations" in result and result["contig_locations"]:
+                        result["contig_location_summary"] = write_stitch_contig_locations(
+                            sample_name, sample_dir, suffix, result["contig_locations"]
+                        )
+                        print(f"[STITCH LOCATIONS - {sample_name}{suffix}]: Wrote contig contribution map to {result['contig_location_summary']}")
                     return result
                 else:
                     print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: REJECTED ({n_pct:.1f}% Ns > {SLICE_MAX_N_PCT}%). Discarding.")
                     os.remove(result["scaffold_fasta"])
+                    if result.get("contig_location_summary") and os.path.exists(result["contig_location_summary"]):
+                        os.remove(result["contig_location_summary"])
 
             else:  # stitch
                 result = stitch_contigs_from_paf(
@@ -399,17 +484,25 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
                     result["alignment_mode"] = mode_name
                     print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: ACCEPTED "
                           f"({coverage*100:.1f}% coverage, {n_pct:.1f}% Ns).")
+                    accepted_paf = paf_file
+                    if "contig_locations" in result and result["contig_locations"]:
+                        result["contig_location_summary"] = write_stitch_contig_locations(
+                            sample_name, sample_dir, suffix, result["contig_locations"]
+                        )
+                        print(f"[STITCH LOCATIONS - {sample_name}{suffix}]: Wrote contig contribution map to {result['contig_location_summary']}")
                     return result
                 else:
                     print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: REJECTED "
                           f"({coverage*100:.1f}% coverage, {n_pct:.1f}% Ns). Discarding.")
                     os.remove(result["scaffold_fasta"])
+                    if result.get("contig_location_summary") and os.path.exists(result["contig_location_summary"]):
+                        os.remove(result["contig_location_summary"])
 
         raise RuntimeError(f"All 6 alignment/scaffolding strategies failed for {sample_name}{suffix}.")
     finally:
-        # Always clean up cached PAF files, on success or failure
+        # Keep the PAF for the tier that produced the accepted scaffold; clean up the others.
         for cached_paf in paf_cache.values():
-            if os.path.exists(cached_paf):
+            if cached_paf != accepted_paf and os.path.exists(cached_paf):
                 os.remove(cached_paf)
 
 
@@ -503,7 +596,7 @@ def run_checkv_qc(config, target_fasta, checkv_dir):
     return comp_out, best_quality, kmer_out, warnings
 
 
-def write_qc_report(config, sample_name, reference_fasta, scaffold_fasta, scaffold_len, reference_len, checkv_stats, sample_dir, is_concatenated=False, scaffold_type="Unknown", alignment_mode="Unknown", n_info="N/A"):
+def write_qc_report(config, sample_name, reference_fasta, scaffold_fasta, scaffold_len, reference_len, checkv_stats, sample_dir, is_concatenated=False, scaffold_type="Unknown", alignment_mode="Unknown", n_info="N/A", contig_location_summary=None):
     completeness, quality, kmer, warnings = checkv_stats
     report_path = os.path.join(sample_dir, f"{sample_name}_scaffold_checkv_report.txt")
     
@@ -518,7 +611,10 @@ def write_qc_report(config, sample_name, reference_fasta, scaffold_fasta, scaffo
         handle.write(f"--- Assembly & Alignment Metrics ---\n")
         handle.write(f"Scaffold Type:      {scaffold_type}\n")
         handle.write(f"Alignment Mode:     {alignment_mode.capitalize()}\n")
-        handle.write(f"Gap-filled Bases:   {n_info}\n\n")
+        handle.write(f"Gap-filled Bases:   {n_info}\n")
+        if contig_location_summary and os.path.exists(contig_location_summary):
+            handle.write(f"Contig Locations:    {contig_location_summary}\n")
+        handle.write(f"\n")
         handle.write(f"--- CheckV Metrics ---\n")
         if is_concatenated:
             handle.write(f"Completeness:       {completeness}% (Estimated from concatenated segments)\n")
@@ -546,7 +642,8 @@ def process_non_segmented_sample(sample_name, config, summary, query_fasta):
     
     print(f"\n==========================================\n Processing non-segmented sample: {sample_name}\n==========================================")
     
-    scaffold_result = run_minimap2_scaffolding(config, reference_fasta, query_fasta, sample_name, sample_dir)
+    scaffold_query_fasta = prepare_query_fasta_for_scaffolding(config, sample_name, query_fasta)
+    scaffold_result = run_minimap2_scaffolding(config, reference_fasta, scaffold_query_fasta, sample_name, sample_dir)
     scaffold_fasta = scaffold_result["scaffold_fasta"]
     
     # Calculate gap-filled bases
@@ -562,7 +659,8 @@ def process_non_segmented_sample(sample_name, config, summary, query_fasta):
     write_qc_report(config, sample_name, reference_fasta, scaffold_fasta, scaffold_len, reference_len, checkv_stats, sample_dir, 
                     scaffold_type=scaffold_result["scaffold_type"], 
                     alignment_mode=scaffold_result["alignment_mode"],
-                    n_info=n_info)
+                    n_info=n_info,
+                    contig_location_summary=scaffold_result.get("contig_location_summary"))
 
     return {
         "sample_accession": sample_name, "reference_fasta": reference_fasta, "scaffold_fasta": scaffold_fasta,
@@ -571,7 +669,8 @@ def process_non_segmented_sample(sample_name, config, summary, query_fasta):
         "checkv_kmer_freq": checkv_stats[2], "checkv_warnings": checkv_stats[3],
         "scaffold_type": scaffold_result["scaffold_type"],
         "alignment_mode": scaffold_result["alignment_mode"],
-        "gap_filled_bases": n_info
+        "gap_filled_bases": n_info,
+        "contig_location_summary": scaffold_result.get("contig_location_summary", "")
     }
 
 
@@ -596,7 +695,8 @@ def process_segmented_sample(sample_name, config, summary, query_fasta):
         ref_fasta = seg["fasta_path"]
         
         print(f"\n[SEGMENT PROCESSING - {sample_name}]: Processing segment {seg_id}...")
-        scaffold_result = run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample_dir, segment_id=seg_id)
+        scaffold_query_fasta = prepare_query_fasta_for_scaffolding(config, sample_name, query_fasta)
+        scaffold_result = run_minimap2_scaffolding(config, ref_fasta, scaffold_query_fasta, sample_name, sample_dir, segment_id=seg_id)
         
         for record in SeqIO.parse(scaffold_result["scaffold_fasta"], "fasta"):
             record.id = f"{sample_name}_{seg_id}"
@@ -609,6 +709,8 @@ def process_segmented_sample(sample_name, config, summary, query_fasta):
             total_ref_len += get_fasta_length(ref_fasta)
             
         segment_details.append(f"{seg_id}: {scaffold_result['scaffold_type']} ({scaffold_result['alignment_mode']})")
+        if scaffold_result.get("contig_location_summary"):
+            print(f"[SEGMENT LOCATIONS - {sample_name}]: {scaffold_result['contig_location_summary']}")
 
     # 1. Write multi-FASTA for downstream tools (iVar, MAFFT) and individual segment CheckV
     combined_scaffold_fasta = os.path.join(sample_dir, f"{sample_name}_segmented_scaffold.fasta")
@@ -652,7 +754,8 @@ def process_segmented_sample(sample_name, config, summary, query_fasta):
         "checkv_warnings": checkv_stats[3],
         "scaffold_type": segment_summary_str,
         "alignment_mode": "Mixed (per segment)",
-        "gap_filled_bases": n_info
+        "gap_filled_bases": n_info,
+        "contig_location_summary": ""
     }
 
 
@@ -716,7 +819,7 @@ def main():
         summary_path = os.path.join(module_5_dir, "Identified_scaffolds.tsv")
         fieldnames = ["sample_accession", "reference_fasta", "scaffold_fasta", "reference_length", 
                       "scaffold_length", "checkv_completeness", "checkv_quality", "checkv_kmer_freq", "checkv_warnings",
-                      "scaffold_type", "alignment_mode", "gap_filled_bases"]
+                      "scaffold_type", "alignment_mode", "gap_filled_bases", "contig_location_summary"]
         with open(summary_path, "w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
             writer.writeheader()
