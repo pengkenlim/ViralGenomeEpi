@@ -89,13 +89,68 @@ def parse_kraken_report(report_path):
     return entries
 
 
-def get_taxids_in_scope(report_paths, viral_scope_taxid):
-    """Return the set of taxids inside the configured viral scope.
+def read_taxonomy_nodes(nodes_path):
+    """Load a taxonomy tree from NCBI nodes.dmp into parent->children mappings."""
+    if not nodes_path or not os.path.exists(nodes_path):
+        return {}, {}
 
-    This is used to classify a read as viral if it is assigned to any lineage
-    beneath the virus root taxid. Unclassified reads are handled separately.
+    children_by_parent = defaultdict(set)
+    parent_by_child = {}
+    with open(nodes_path, "r") as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if not line or "\t|" not in line:
+                continue
+            fields = [part.strip() for part in line.split("\t|")]
+            if len(fields) < 2:
+                continue
+            try:
+                taxid = int(fields[0])
+                parent_taxid = int(fields[1])
+            except ValueError:
+                continue
+            parent_by_child[taxid] = parent_taxid
+            children_by_parent[parent_taxid].add(taxid)
+    return parent_by_child, children_by_parent
+
+
+def collect_taxonomy_descendants(root_taxid, parent_by_child, children_by_parent):
+    """Return the root taxid plus every descendant taxid beneath it."""
+    if root_taxid is None:
+        return set()
+
+    descendants = {str(root_taxid)}
+    queue = [int(root_taxid)]
+    seen = set()
+
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        for child in sorted(children_by_parent.get(current, set())):
+            child_str = str(child)
+            if child_str not in descendants:
+                descendants.add(child_str)
+                queue.append(child)
+
+    return descendants
+
+
+def get_taxids_in_scope(report_paths, viral_scope_taxid, nodes_path=None):
+    """Return the exact descendant taxid set for the configured scope.
+
+    Prefer the NCBI taxonomy dump when available; this avoids relying on the
+    report indentation depth as a proxy for true taxonomic ancestry.
     """
     scope_taxids = set()
+
+    if nodes_path and os.path.exists(nodes_path):
+        parent_by_child, children_by_parent = read_taxonomy_nodes(nodes_path)
+        scope_taxids = collect_taxonomy_descendants(viral_scope_taxid, parent_by_child, children_by_parent)
+        if scope_taxids:
+            return scope_taxids
+
     for report_path in report_paths:
         if not os.path.exists(report_path):
             continue
@@ -118,6 +173,15 @@ def get_taxids_in_scope(report_paths, viral_scope_taxid):
     return scope_taxids
 
 
+def get_taxonomy_nodes_path(config):
+    """Resolve the taxonomy nodes dump path from module config if available."""
+    if hasattr(config, "module_2_params") and config.module_2_params.get("nodes_path"):
+        return config.module_2_params.get("nodes_path")
+    if hasattr(config, "module_4_params") and config.module_4_params.get("nodes_path"):
+        return config.module_4_params.get("nodes_path")
+    return None
+
+
 def parse_kraken_classification(classification_path):
     """Parse a Kraken2 classification output file into read -> {status, taxid}."""
     assignments = {}
@@ -137,13 +201,14 @@ def parse_kraken_classification(classification_path):
     return assignments
 
 
-def split_reads_by_viral_status(classification_assignments, viral_taxids):
-    """Split read IDs into viral+unclassified vs non-viral groups.
+def split_reads_by_viral_status(classification_assignments, viral_taxids, include_unclassified=True):
+    """Split read IDs into viral + optional-unclassified vs non-viral reads.
 
-    Group 1: non-viral reads
-    Group 2: reads classified as viral or unclassified
+    The broad bucket used downstream should include all reads in the configured viral
+    scope plus any unclassified reads. This is the set used to make the filtered
+    FASTQ outputs, and it should be a superset of the strict viral-only bucket.
     """
-    viral_plus_unclassified = set()
+    viral_reads = set()
     non_viral = set()
 
     for read_id, info in classification_assignments.items():
@@ -152,12 +217,17 @@ def split_reads_by_viral_status(classification_assignments, viral_taxids):
         status = info["status"]
         taxid = info["taxid"]
 
-        if status == "U" or taxid in viral_taxids:
-            viral_plus_unclassified.add(read_id)
+        if status == "U":
+            if include_unclassified:
+                viral_reads.add(read_id)
+            else:
+                non_viral.add(read_id)
+        elif taxid in viral_taxids:
+            viral_reads.add(read_id)
         else:
             non_viral.add(read_id)
 
-    return non_viral, viral_plus_unclassified
+    return non_viral, viral_reads
 
 
 def split_reads_by_viral_only(classification_assignments, viral_taxids):
@@ -292,8 +362,16 @@ def summarize_classification_assignments(assignments, viral_taxids, dominant_tax
     }
 
 
-def dominant_virus_plus_unclassified_ids(assignments, dominant_taxids):
-    """Return IDs for unclassified reads plus reads assigned anywhere in the dominant viral lineage."""
+def dominant_virus_plus_unclassified_ids(assignments, dominant_taxids, viral_taxids=None):
+    """Return IDs for unclassified reads plus reads in the dominant viral lineage.
+
+    The dominant lineage is treated as a subset of the configured viral scope, and
+    the returned set is therefore constrained to that exact viral subtree to avoid
+    unbounded expansion beyond the intended scope.
+    """
+    if viral_taxids is not None:
+        dominant_taxids = set(dominant_taxids) & set(viral_taxids)
+
     keep = set()
     for read_id, info in assignments.items():
         if read_id is None:
@@ -492,9 +570,16 @@ def process_sample(sample_name, config):
     )
 
     paired_assignments = parse_kraken_classification(paired_classification_out)
-    paired_viral_taxids = get_taxids_in_scope([paired_report_out], config.module_2_params["scope_to_keep_taxId"])
+    nodes_path = get_taxonomy_nodes_path(config)
+    paired_viral_taxids = get_taxids_in_scope(
+        [paired_report_out],
+        config.module_2_params["scope_to_keep_taxId"],
+        nodes_path,
+    )
     non_viral_paired, viral_plus_unclassified_paired = split_reads_by_viral_status(
-        paired_assignments, paired_viral_taxids
+        paired_assignments,
+        paired_viral_taxids,
+        include_unclassified=True,
     )
     _, viral_only_paired = split_reads_by_viral_only(paired_assignments, paired_viral_taxids)
 
@@ -554,9 +639,15 @@ def process_sample(sample_name, config):
         )
 
         singleton_assignments = parse_kraken_classification(singleton_classification_out)
-        singleton_taxids = get_taxids_in_scope([singleton_report_out], config.module_2_params["scope_to_keep_taxId"])
+        singleton_taxids = get_taxids_in_scope(
+            [singleton_report_out],
+            config.module_2_params["scope_to_keep_taxId"],
+            nodes_path,
+        )
         non_viral_singleton, viral_plus_unclassified_singleton = split_reads_by_viral_status(
-            singleton_assignments, singleton_taxids
+            singleton_assignments,
+            singleton_taxids,
+            include_unclassified=True,
         )
         _, viral_only_singleton = split_reads_by_viral_only(singleton_assignments, singleton_taxids)
 
@@ -596,7 +687,11 @@ def process_sample(sample_name, config):
     if dominant_taxid is not None:
         dominant_taxids = get_allowed_taxids(report_paths[0], config.module_2_params["scope_to_keep_taxId"], dominant_taxid)
 
-    dominant_paired_ids = dominant_virus_plus_unclassified_ids(paired_assignments, dominant_taxids) if dominant_taxids else set()
+    dominant_paired_ids = (
+        dominant_virus_plus_unclassified_ids(paired_assignments, dominant_taxids, paired_viral_taxids)
+        if dominant_taxids
+        else set()
+    )
     dominant_paired_out_r1 = os.path.join(sample_out_dir, f"{sample_name}_dominant_virus_plus_unclassified_R1.fastq")
     dominant_paired_out_r2 = os.path.join(sample_out_dir, f"{sample_name}_dominant_virus_plus_unclassified_R2.fastq")
     dominant_paired_count = write_filtered_paired_fastq(
@@ -610,7 +705,11 @@ def process_sample(sample_name, config):
 
     dominant_singleton_ids = set()
     if singleton is not None and dominant_taxids:
-        dominant_singleton_ids = dominant_virus_plus_unclassified_ids(singleton_assignments, dominant_taxids)
+        dominant_singleton_ids = dominant_virus_plus_unclassified_ids(
+            singleton_assignments,
+            dominant_taxids,
+            singleton_taxids,
+        )
     dominant_singleton_out = os.path.join(sample_out_dir, f"{sample_name}_dominant_virus_plus_unclassified_singleton.fastq")
     dominant_singleton_count = write_filtered_fastq(
         singleton,

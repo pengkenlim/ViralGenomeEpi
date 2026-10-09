@@ -72,6 +72,10 @@ module_2_params = {
     # Path to the Kraken2 k-mer database executable.
     "kraken2_db_path": "/PATH/TO/k2_standard_20260626/",
     # Directory containing the Kraken2 reference database.
+    "nodes_path": "/media/mngs/48TBRAID5HDD/Temp_output_ken/taxdb_data/nodes.dmp",
+    # NCBI taxonomy nodes table; used to resolve exact descendant taxids for the scope.
+    "names_path": "/media/mngs/48TBRAID5HDD/Temp_output_ken/taxdb_data/names.dmp",
+    # NCBI taxonomy names table; used for taxon name lookup when needed.
     "scope_to_keep_taxId": 10239,
     # Viral taxonomy ID kept during the classification step (e.g., viruses).
 }
@@ -137,6 +141,11 @@ module_5_params = {
         # "sampleA": ["contigname_1", "contigname_2"],
     },
     # Dictionary keyed by sample accession. Any matching contig IDs are dropped before alignment/scaffolding.
+    "explicit_ref_genome": {
+        # Optional per-sample genome accession override for scaffolding.
+        # "sampleA": "NC_045512.2",
+    },
+    # Dictionary keyed by sample accession. When set, this accession is used instead of the module 4 selection.
 }
 
 

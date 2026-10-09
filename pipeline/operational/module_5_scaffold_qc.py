@@ -48,17 +48,21 @@ def get_selected_reference_fasta(config, sample_name):
         raise FileNotFoundError(f"Module 4 summary not found for sample {sample_name}: {summary_path}")
     with open(summary_path, "r") as handle: summary = json.load(handle)
     if summary.get("is_segmented") is True or summary.get("selected_segments"): return None
-    
-    genome_accession = summary.get("genome_accession") or summary.get("best_reference_accession")
+
+    explicit_accession = get_explicit_ref_genome(config, sample_name)
+    if explicit_accession:
+        genome_accession = explicit_accession
+    else:
+        genome_accession = summary.get("genome_accession") or summary.get("best_reference_accession")
     if not genome_accession: raise ValueError(f"No genome accession recorded for {sample_name}.")
-    
+
     module_4_ref_dir = os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
     target = os.path.join(module_4_ref_dir, f"{genome_accession}.fasta")
     if os.path.exists(target): return target
-    
+
     symlink = os.path.join(get_module_4_dir(config, sample_name), f"selected_reference_{genome_accession}.fasta")
     if os.path.exists(symlink): return symlink
-    raise FileNotFoundError(f"Reference FASTA not found for {sample_name}.")
+    raise FileNotFoundError(f"Reference FASTA not found for {sample_name}: {genome_accession}.")
 
 def get_fasta_length(fasta_path):
     total_length = 0
@@ -70,6 +74,17 @@ def get_fasta_length(fasta_path):
 
 def get_config_value(config, key, default=None):
     return config.module_5_params.get(key, default)
+
+
+def get_explicit_ref_genome(config, sample_name):
+    """Return an explicitly configured reference accession for a sample, if any."""
+    raw = get_config_value(config, "explicit_ref_genome", {})
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get(sample_name)
+    if value is None:
+        return None
+    return str(value).strip() or None
 
 
 def get_excluded_contigs(config, sample_name):

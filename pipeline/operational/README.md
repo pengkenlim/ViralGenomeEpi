@@ -20,7 +20,7 @@ Placeholders such as `/PATH/TO/...` and the empty `output_dir` must be filled in
 | 2 | `Kraken2_k2_bin_path`, `kraken2_db_path`, `scope_to_keep_taxId` (10239 = Viruses), `threads` |
 | 3 | `rnaviralspades_bin_path`, `reads_subset` (`viral` or `dominant_virus`), `use_rna_mode`, `over_assembly`, `memory` (passed to SPAdes `-m`, GB), `threads` |
 | 4 | `blastn_bin_path`, `blastdbcmd_bin_path`, `cd_hit_est_bin_path`, `blast_db_path`, `seq2genome_map_path`, `assembly_data_report_path`, `nodes_path`, `names_path`, `threads` |
-| 5 | `checkv_bin_path`, `checkv_db_dir`, `minimap2_bin_path`, optional `fallback_strategy` (`technique_first` default, or `stringency_first`), optional `exclude_contigs` (per-sample contig IDs to ignore before scaffolding), `threads` |
+| 5 | `checkv_bin_path`, `checkv_db_dir`, `minimap2_bin_path`, optional `fallback_strategy` (`technique_first` default, or `stringency_first`), optional `exclude_contigs` (per-sample contig IDs to ignore before scaffolding), optional `explicit_ref_genome` (per-sample accession override), `threads` |
 | 6 | `minimap2_bin_path`, `samtools_bin_path`, `ivar_bin_path`, `checkv_bin_path`, `checkv_db_dir`, `threads` |
 | 7 | `mafft_bin_path`, `fasttree_bin_path`, `input_samples`, `analysis_name`, `threads` |
 | 8 | `snpsites_bin_path`, `snp_cutoff` (default 3), `linkage_method` (SciPy; `single` in the template), `input_samples`, `analysis_name`, `threads` |
@@ -51,18 +51,22 @@ Three minimap2 modes (`conserved`: `-c -x asm5`, ≥70% identity; `divergent_70`
 
 `technique_first` (default) tries slice at all three modes, then stitch at all three. `stringency_first` tries slice then stitch per mode. The first accepted tier wins and is recorded as `alignment_mode` in `Identified_scaffolds.tsv`.
 
-You can also exclude problematic contigs from scaffolding on a per-sample basis with `module_5_params["exclude_contigs"]`:
+You can also exclude problematic contigs from scaffolding on a per-sample basis with `module_5_params["exclude_contigs"]`, or force a reference genome accession override with `module_5_params["explicit_ref_genome"]`:
 
 ```python
 module_5_params = {
     "exclude_contigs": {
         "sampleA": ["contigname_1", "contigname_2"],
         "sampleB": ["bad_contig_7"],
-    }
+    },
+    "explicit_ref_genome": {
+        "sampleA": "NC_045512.2",
+        "sampleB": "NC_038235.1",
+    },
 }
 ```
 
-Any contig ID listed for a sample is removed before alignment/scaffolding. For stitched scaffolds, the script additionally writes a TSV of the reference coordinates contributed by each stitched contig (`<sample>_stitch_contig_locations.tsv`) to help trace which genomic interval each contig contributed to the final scaffold.
+Any contig ID listed for a sample is removed before alignment/scaffolding. When `explicit_ref_genome` includes a sample, that accession is used instead of the auto-selected module 4 reference for the scaffold. For stitched scaffolds, the script additionally writes a TSV of the reference coordinates contributed by each stitched contig (`<sample>_stitch_contig_locations.tsv`) to help trace which genomic interval each contig contributed to the final scaffold.
 
 ### Module 6 iVar passes
 
