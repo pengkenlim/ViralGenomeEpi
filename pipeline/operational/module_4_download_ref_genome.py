@@ -47,7 +47,7 @@ def get_module_3_dir(config, sample_name):
     fasta_records = []
     seen_counts = {}
 
-    for subdir in ["viral", "viral_over_assembly", "dominant_virus", "dominant_virus_over_assembly"]:
+    for subdir in ["viral", "viral_over_assembly", "dominant_virus", "dominant_virus_over_assembly", "aligned_to_ref_over_assembly", "aligned_to_ref"]:
         potential_fasta = os.path.join(config.cross_module_params["output_dir"], "module_3", subdir, sample_name, "transcripts.fasta")
         if not os.path.exists(potential_fasta):
             continue
