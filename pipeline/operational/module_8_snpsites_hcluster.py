@@ -533,7 +533,7 @@ def compute_pairwise_snp_matrix(alignment_file):
     return df_matrix, df_pairs
 
 
-def plot_snp_histogram(df_pairs, out_dir, snp_cutoff):
+def plot_snp_histogram(df_pairs, out_dir, snp_cutoff, draw_cutoff_line=True):
     """Generate a histogram of pairwise SNP distances."""
     print("[PLOTTING]: Generating pairwise SNP distance histogram...")
     plt.figure(figsize=(8, 5))
@@ -549,19 +549,21 @@ def plot_snp_histogram(df_pairs, out_dir, snp_cutoff):
         alpha=0.8,
     )
 
-    plt.axvline(
-        x=snp_cutoff,
-        color="red",
-        linestyle="--",
-        linewidth=1.5,
-        label=f"Cluster Cutoff ({snp_cutoff} SNPs)",
-    )
+    if draw_cutoff_line:
+        plt.axvline(
+            x=snp_cutoff,
+            color="red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Cluster Cutoff ({snp_cutoff} SNPs)",
+        )
 
     plt.title("Distribution of Pairwise SNP Differences", fontsize=12, fontweight="bold")
     plt.xlabel("Pairwise SNP Difference", fontsize=10)
     plt.ylabel("Number of Sample Pairs", fontsize=10)
     plt.grid(axis="y", linestyle=":", alpha=0.6)
-    plt.legend()
+    if draw_cutoff_line:
+        plt.legend()
     plt.tight_layout()
 
     fig_path = os.path.join(out_dir, "pairwise_snp_histogram.png")
@@ -570,7 +572,7 @@ def plot_snp_histogram(df_pairs, out_dir, snp_cutoff):
     print(f"[PLOTTING]: Histogram saved to {fig_path}")
 
 
-def perform_hierarchical_clustering(df_matrix, out_dir, snp_cutoff, linkage_method):
+def perform_hierarchical_clustering(df_matrix, out_dir, snp_cutoff, linkage_method, draw_cutoff_line=True):
     """Cluster samples using average-linkage distance clustering."""
     print(f"[CLUSTERING]: Conducting hierarchical clustering ({linkage_method} linkage)...")
 
@@ -586,13 +588,14 @@ def perform_hierarchical_clustering(df_matrix, out_dir, snp_cutoff, linkage_meth
         color_threshold=snp_cutoff,
     )
 
-    plt.axhline(
-        y=snp_cutoff,
-        color="red",
-        linestyle="--",
-        linewidth=1.5,
-        label=f"Cutoff = {snp_cutoff} SNPs",
-    )
+    if draw_cutoff_line:
+        plt.axhline(
+            y=snp_cutoff,
+            color="red",
+            linestyle="--",
+            linewidth=1.5,
+            label=f"Cutoff = {snp_cutoff} SNPs",
+        )
 
     plt.title(
         f"Hierarchical Clustering Dendrogram ({linkage_method.capitalize()} Linkage)",
@@ -601,7 +604,8 @@ def perform_hierarchical_clustering(df_matrix, out_dir, snp_cutoff, linkage_meth
     )
     plt.xlabel("Sample Accession", fontsize=10)
     plt.ylabel("Pairwise SNP Distance", fontsize=10)
-    plt.legend(loc="upper right")
+    if draw_cutoff_line:
+        plt.legend(loc="upper right")
     plt.tight_layout()
 
     dendrogram_path = os.path.join(out_dir, "hierarchical_clustering_dendrogram.png")
@@ -674,6 +678,9 @@ def main():
         get_config_value(config, "module_8_params", "linkage_method", "average")
         or "average"
     )
+    draw_cutoff_line = bool(
+        get_config_value(config, "module_8_params", "draw_cutoff_line", True)
+    )
     snpsites_bin = resolve_executable_path(config, "snpsites_bin_path")
 
     output_dir = get_module_8_dir(config)
@@ -706,13 +713,14 @@ def main():
     df_matrix.to_csv(matrix_csv)
 
     # Histogram + clustering stay samples-only (reference excluded by design)
-    plot_snp_histogram(df_pairs, output_dir, int(snp_cutoff))
+    plot_snp_histogram(df_pairs, output_dir, int(snp_cutoff), draw_cutoff_line=draw_cutoff_line)
 
     df_clusters = perform_hierarchical_clustering(
         df_matrix,
         output_dir,
         int(snp_cutoff),
         linkage_method,
+        draw_cutoff_line=draw_cutoff_line,
     )
 
     cluster_csv = os.path.join(output_dir, f"clusters_{int(snp_cutoff)}snp_cutoff.csv")

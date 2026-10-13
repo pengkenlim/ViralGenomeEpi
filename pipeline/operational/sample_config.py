@@ -201,6 +201,8 @@ module_8_params = {
     # Executable name or full path for the snp-sites binary.
     "snp_cutoff": 3,
     # Maximum pairwise SNP distance used to define the cluster threshold.
+    "draw_cutoff_line": True,
+    # If True, draw a red cutoff marker on the SNP histogram and dendrogram.
     "linkage_method": "single",
     # Hierarchical clustering method used by SciPy (e.g. single, average, complete).
     "input_samples": [

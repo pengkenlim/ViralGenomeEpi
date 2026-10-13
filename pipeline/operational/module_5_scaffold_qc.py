@@ -304,10 +304,13 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
             paf_file = get_paf(mode)
 
             if not os.path.exists(paf_file) or os.path.getsize(paf_file) == 0:
-                msg = f"{mode_name}-{technique}: No alignments found"
+                msg = f"{mode_name}-{technique}: No alignments found (Cov=N/A, N%=N/A)"
                 print(f"[TIER {tier_idx}/6 - {mode_name}-{technique}]: {msg}. Skipping.")
                 failure_log.append(msg)
                 continue
+
+            alignments = parse_paf_alignments(paf_file, min_identity=mode["min_identity"])
+            coverage = calculate_total_reference_coverage(alignments, ref_length) if alignments else 0.0
 
             if technique == "slice":
                 result = try_best_slice_extraction(
@@ -315,7 +318,10 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
                     min_identity=mode["min_identity"]
                 )
                 if not result:
-                    msg = f"{mode_name}-slice: No single contig covers >= {SLICE_MIN_REF_COVERAGE*100:.0f}% of reference"
+                    msg = (
+                        f"{mode_name}-slice: No single contig covers >= {SLICE_MIN_REF_COVERAGE*100:.0f}% "
+                        f"of reference (Cov={coverage*100:.1f}%, N%=N/A)"
+                    )
                     print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: {msg}. Skipping.")
                     failure_log.append(msg)
                     continue
@@ -325,10 +331,10 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
 
                 if n_pct <= SLICE_MAX_N_PCT:
                     result["alignment_mode"] = mode_name
-                    print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: ACCEPTED ({n_pct:.1f}% Ns).")
+                    print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: ACCEPTED (Cov={coverage*100:.1f}%, N%={n_pct:.1f}%).")
                     return result
                 else:
-                    msg = f"{mode_name}-slice: N%={n_pct:.1f}% (>{SLICE_MAX_N_PCT}%)"
+                    msg = f"{mode_name}-slice: Cov={coverage*100:.1f}%, N%={n_pct:.1f}% (>{SLICE_MAX_N_PCT}%)"
                     print(f"[TIER {tier_idx}/6 - {mode_name}-slice]: REJECTED ({msg}). Discarding.")
                     failure_log.append(msg)
                     os.remove(result["scaffold_fasta"])
@@ -339,14 +345,13 @@ def run_minimap2_scaffolding(config, ref_fasta, query_fasta, sample_name, sample
                     min_identity=mode["min_identity"]
                 )
                 if not result:
-                    msg = f"{mode_name}-stitch: No stitchable contigs resolved"
+                    msg = f"{mode_name}-stitch: No stitchable contigs resolved (Cov={coverage*100:.1f}%, N%=N/A)"
                     print(f"[TIER {tier_idx}/6 - {mode_name}-stitch]: {msg}. Skipping.")
                     failure_log.append(msg)
                     continue
 
                 seq = str(next(SeqIO.parse(result["scaffold_fasta"], "fasta")).seq)
                 n_pct = (seq.upper().count('N') / len(seq) * 100) if seq else 100.0
-                alignments = parse_paf_alignments(paf_file, min_identity=mode["min_identity"])
                 coverage = calculate_total_reference_coverage(alignments, ref_length)
 
                 if coverage >= STITCH_MIN_REF_COVERAGE and n_pct <= STITCH_MAX_N_PCT:
@@ -495,7 +500,9 @@ def process_non_segmented_sample(sample_name, config, summary, query_fasta):
             "sample_accession": sample_name, "reference_fasta": reference_fasta, "scaffold_fasta": "FAILED",
             "reference_length": get_fasta_length(reference_fasta), "scaffold_length": 0,
             "checkv_completeness": "N/A", "checkv_quality": "N/A", "checkv_kmer_freq": "N/A", "checkv_warnings": "N/A",
-            "scaffold_type": "FAILED", "alignment_mode": "FAILED", "gap_filled_bases": "N/A", "failure_reason": fail_reason
+            "scaffold_type": "FAILED", "alignment_mode": "FAILED", "gap_filled_bases": "N/A",
+            "failed_attempt_metrics": fail_reason,
+            "failure_reason": fail_reason,
         }
 
     scaffold_fasta = scaffold_result["scaffold_fasta"]
@@ -516,7 +523,9 @@ def process_non_segmented_sample(sample_name, config, summary, query_fasta):
         "checkv_completeness": checkv_stats[0], "checkv_quality": checkv_stats[1],
         "checkv_kmer_freq": checkv_stats[2], "checkv_warnings": checkv_stats[3],
         "scaffold_type": scaffold_result["scaffold_type"], "alignment_mode": scaffold_result["alignment_mode"],
-        "gap_filled_bases": n_info, "failure_reason": ""
+        "gap_filled_bases": n_info,
+        "failed_attempt_metrics": "",
+        "failure_reason": "",
     }
 
 
@@ -550,7 +559,9 @@ def process_segmented_sample(sample_name, config, summary, query_fasta):
                 "sample_accession": sample_name, "reference_fasta": "Multi-segment (see summary JSON)", "scaffold_fasta": "FAILED",
                 "reference_length": total_ref_len, "scaffold_length": 0,
                 "checkv_completeness": "N/A", "checkv_quality": "N/A", "checkv_kmer_freq": "N/A", "checkv_warnings": "N/A",
-                "scaffold_type": "FAILED", "alignment_mode": "FAILED", "gap_filled_bases": "N/A", "failure_reason": fail_reason
+                "scaffold_type": "FAILED", "alignment_mode": "FAILED", "gap_filled_bases": "N/A",
+                "failed_attempt_metrics": fail_reason,
+                "failure_reason": fail_reason,
             }
         
         for record in SeqIO.parse(scaffold_result["scaffold_fasta"], "fasta"):
@@ -596,7 +607,9 @@ def process_segmented_sample(sample_name, config, summary, query_fasta):
         "checkv_completeness": checkv_stats[0], "checkv_quality": checkv_stats[1],
         "checkv_kmer_freq": checkv_stats[2], "checkv_warnings": checkv_stats[3],
         "scaffold_type": segment_summary_str, "alignment_mode": "Mixed (per segment)",
-        "gap_filled_bases": n_info, "failure_reason": ""
+        "gap_filled_bases": n_info,
+        "failed_attempt_metrics": "",
+        "failure_reason": "",
     }
 
 
@@ -678,7 +691,7 @@ def main():
         
         fieldnames = ["sample_accession", "reference_fasta", "scaffold_fasta", "reference_length", 
                       "scaffold_length", "checkv_completeness", "checkv_quality", "checkv_kmer_freq", "checkv_warnings",
-                      "scaffold_type", "alignment_mode", "gap_filled_bases", "failure_reason"]
+                      "scaffold_type", "alignment_mode", "gap_filled_bases", "failed_attempt_metrics", "failure_reason"]
                       
         with open(summary_path, "w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
