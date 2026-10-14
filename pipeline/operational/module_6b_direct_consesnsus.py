@@ -10,7 +10,8 @@ from Bio import SeqIO
 """
 Module 6B: Direct reference mapping consensus generation.
 Mimics the CZ ID pipeline approach: map reads directly to a reference, 
-call consensus with iVar (via samtools mpileup), and evaluate completeness/quality.
+call consensus with iVar (via samtools mpileup), evaluate completeness/quality,
+and calculate detailed coverage/depth statistics.
 """
 
 def load_config(config_path):
@@ -71,6 +72,47 @@ def find_trimmed_reads(sample_dir, sample_name, read_1_str, read_2_str, singleto
                 singleton = full_path
     return read1, read2, singleton
 
+def calculate_depth_stats(bam_file, samtools_bin):
+    """Calculate coverage and depth statistics from a sorted BAM file."""
+    cmd = [samtools_bin, "depth", "-a", bam_file]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    
+    depths = []
+    for line in result.stdout.strip().split('\n'):
+        if not line:
+            continue
+        parts = line.split('\t')
+        if len(parts) >= 3:
+            depths.append(int(parts[2]))
+            
+    if not depths:
+        return {
+            "coverage_1x_pct": 0.0, "coverage_10x_pct": 0.0,
+            "mean_depth_overall": 0.0, "mean_depth_covered": 0.0,
+            "min_depth_covered": 0, "max_depth": 0
+        }
+        
+    covered_depths = [d for d in depths if d > 0]
+    total_bases = len(depths)
+    covered_bases = len(covered_depths)
+    
+    coverage_1x_pct = (covered_bases / total_bases) * 100 if total_bases > 0 else 0.0
+    coverage_10x_pct = (sum(1 for d in covered_depths if d >= 10) / total_bases) * 100 if total_bases > 0 else 0.0
+    
+    mean_depth_overall = sum(depths) / total_bases if total_bases > 0 else 0.0
+    mean_depth_covered = sum(covered_depths) / covered_bases if covered_bases > 0 else 0.0
+    min_depth_covered = min(covered_depths) if covered_depths else 0
+    max_depth = max(depths) if depths else 0
+    
+    return {
+        "coverage_1x_pct": round(coverage_1x_pct, 2),
+        "coverage_10x_pct": round(coverage_10x_pct, 2),
+        "mean_depth_overall": round(mean_depth_overall, 2),
+        "mean_depth_covered": round(mean_depth_covered, 2),
+        "min_depth_covered": min_depth_covered,
+        "max_depth": max_depth
+    }
+
 def run_minimap2_and_ivar(config, sample_name, ref_fasta, read1, read2, singleton, sample_dir):
     minimap2_bin = resolve_executable_path(config, "minimap2_bin_path")
     samtools_bin = resolve_executable_path(config, "samtools_bin_path")
@@ -107,7 +149,6 @@ def run_minimap2_and_ivar(config, sample_name, ref_fasta, read1, read2, singleto
     consensus_fasta = f"{prefix}.fasta"
     consensus_fa = f"{prefix}.fa"
     
-    # Handle iVar's default .fa extension
     if os.path.exists(consensus_fa):
         print(f"[MODULE 6B]: iVar produced .fa. Renaming to .fasta for consistency.")
         shutil.move(consensus_fa, consensus_fasta)
@@ -208,9 +249,11 @@ def process_sample(sample_name, config):
     consensus_fasta, bam_file = run_minimap2_and_ivar(config, sample_name, ref_fasta, read1, read2, singleton, sample_dir)
     seq_stats = evaluate_sequence(consensus_fasta)
     
-    checkv_dir = os.path.join(sample_dir, "checkv")
+    # Calculate depth stats
+    samtools_bin = resolve_executable_path(config, "samtools_bin_path")
+    depth_stats = calculate_depth_stats(bam_file, samtools_bin)
     
-    # Prevent CheckV crash on low-coverage (high N%) genomes
+    checkv_dir = os.path.join(sample_dir, "checkv")
     if seq_stats["n_pct"] > 50.0:
         print(f"[CHECKV SKIP]: Skipping CheckV for {sample_name} because genome is {seq_stats['n_pct']}% Ns.")
         comp, quality, kmer, warnings = "N/A", "N/A", "N/A", "Skipped: >50% Ns"
@@ -225,6 +268,12 @@ def process_sample(sample_name, config):
         "n_count": seq_stats["n_count"],
         "n_pct": seq_stats["n_pct"],
         "non_canonical_count": seq_stats["non_canonical_count"],
+        "coverage_1x_pct": depth_stats["coverage_1x_pct"],
+        "coverage_10x_pct": depth_stats["coverage_10x_pct"],
+        "mean_depth_overall": depth_stats["mean_depth_overall"],
+        "mean_depth_covered": depth_stats["mean_depth_covered"],
+        "min_depth_covered": depth_stats["min_depth_covered"],
+        "max_depth": depth_stats["max_depth"],
         "checkv_completeness": comp,
         "checkv_quality": quality,
         "checkv_kmer_freq": kmer,
@@ -264,9 +313,15 @@ def main():
         module_6b_dir = os.path.join(config.cross_module_params["output_dir"], "module_6b")
         os.makedirs(module_6b_dir, exist_ok=True)
         summary_path = os.path.join(module_6b_dir, "direct_consensus_summary.tsv")
-        fieldnames = ["sample_accession", "reference_fasta", "consensus_fasta", "length", 
-                      "n_count", "n_pct", "non_canonical_count", "checkv_completeness", 
-                      "checkv_quality", "checkv_kmer_freq", "checkv_warnings"]
+        
+        fieldnames = [
+            "sample_accession", "reference_fasta", "consensus_fasta", "length", 
+            "n_count", "n_pct", "non_canonical_count", 
+            "coverage_1x_pct", "coverage_10x_pct", "mean_depth_overall", 
+            "mean_depth_covered", "min_depth_covered", "max_depth",
+            "checkv_completeness", "checkv_quality", "checkv_kmer_freq", "checkv_warnings"
+        ]
+        
         with open(summary_path, "w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=fieldnames, delimiter="\t", lineterminator="\n")
             writer.writeheader()
