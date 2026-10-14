@@ -103,4 +103,5 @@ Currently covers module 9 ([../../tests](../../tests)).
 ## See also
 
 - [../../README.md](../../README.md): repository overview
+- [../../docs/modules/](../../docs/modules): detailed per-module documentation (inputs, algorithms, parameters, outputs, edge cases)
 - [../basic](../basic): legacy pipeline scripts
