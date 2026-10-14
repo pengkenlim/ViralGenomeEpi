@@ -46,12 +46,8 @@ def resolve_executable_path(config, key):
 
 
 # ---------------------------------------------------------------------------
-# Output resolution
+# Output resolution & Consensus discovery
 # ---------------------------------------------------------------------------
-
-def get_module_6_dir(config, sample_name):
-    return os.path.join(config.cross_module_params["output_dir"], "module_6", sample_name)
-
 
 def get_module_7_dir(config):
     analysis_name = (
@@ -61,10 +57,6 @@ def get_module_7_dir(config):
     return os.path.join(config.cross_module_params["output_dir"], "module_7", analysis_name)
 
 
-def get_module_4_ref_genomes_dir(config):
-    return os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
-
-
 def get_input_samples(config):
     samples = get_config_value(config, "module_7_params", "input_samples", None)
     if samples:
@@ -72,46 +64,44 @@ def get_input_samples(config):
     return list(config.cross_module_params.get("samples", []))
 
 
-def get_msa_reference(config):
-    """Return the configured MSA reference (accession or FASTA path), or None.
-
-    Config example:
-        module_7_params = {
-            ...
-            "msa_reference": "GCF_000856445.1",   # set to None (or omit) to skip the ref tree
-        }
-    """
-    for key in ("msa_reference", "msa_ref", "MSA_reference"):
-        value = get_config_value(config, "module_7_params", key, None)
-        if value:
-            return str(value).strip()
-    return None
+def get_consensus_dir(config, sample_name):
+    """Resolve the correct consensus directory based on config source."""
+    source = get_config_value(config, "module_7_params", "consensus_source", "module_6")
+    if source == "module_6b":
+        return os.path.join(config.cross_module_params["output_dir"], "module_6b", sample_name)
+    else:
+        return os.path.join(config.cross_module_params["output_dir"], "module_6", sample_name)
 
 
-# ---------------------------------------------------------------------------
-# Consensus discovery: locate the actual module 6 outputs we wrote
-# ---------------------------------------------------------------------------
+def find_consensus_fasta(config, sample_name):
+    """Locate the consensus FASTA, supporting both Module 6 and Module 6B."""
+    consensus_dir = get_consensus_dir(config, sample_name)
+    if not os.path.isdir(consensus_dir):
+        raise FileNotFoundError(f"Consensus directory not found for {sample_name}: {consensus_dir}")
 
-def find_polished_fasta(config, sample_name):
-    sample_root = get_module_6_dir(config, sample_name)
-    if not os.path.isdir(sample_root):
-        raise FileNotFoundError(f"Module 6 output directory not found for {sample_name}: {sample_root}")
-
-    candidates = [
-        os.path.join(sample_root, f"{sample_name}_consensus_combined.fasta"),
-        os.path.join(sample_root, sample_name, f"{sample_name}_final_polished_consensus.fa"),
-        os.path.join(sample_root, sample_name, f"{sample_name}_final_polished_consensus.fasta"),
-        os.path.join(sample_root, sample_name, f"{sample_name}_polished_consensus.fa"),
-        os.path.join(sample_root, sample_name, f"{sample_name}_polished_consensus.fasta"),
-    ]
+    source = get_config_value(config, "module_7_params", "consensus_source", "module_6")
+    
+    if source == "module_6b":
+        candidates = [
+            os.path.join(consensus_dir, f"{sample_name}_direct_consensus.fasta"),
+            os.path.join(consensus_dir, f"{sample_name}_direct_consensus.fa"),
+        ]
+    else:
+        candidates = [
+            os.path.join(consensus_dir, f"{sample_name}_consensus_combined.fasta"),
+            os.path.join(consensus_dir, sample_name, f"{sample_name}_final_polished_consensus.fa"),
+            os.path.join(consensus_dir, sample_name, f"{sample_name}_final_polished_consensus.fasta"),
+            os.path.join(consensus_dir, sample_name, f"{sample_name}_polished_consensus.fa"),
+            os.path.join(consensus_dir, sample_name, f"{sample_name}_polished_consensus.fasta"),
+        ]
 
     for path in candidates:
         if os.path.exists(path):
             return path
 
-    # Last-resort search for any FASTA files under the sample directory
+    # Last-resort search for any FASTA files under the consensus directory
     matches = []
-    for root, _, files in os.walk(sample_root):
+    for root, _, files in os.walk(consensus_dir):
         for name in files:
             if name.lower().endswith((".fa", ".fasta")):
                 matches.append(os.path.join(root, name))
@@ -119,41 +109,34 @@ def find_polished_fasta(config, sample_name):
     if matches:
         return sorted(matches)[0]
 
-    raise FileNotFoundError(f"No polished consensus FASTA found for {sample_name} in {sample_root}")
+    raise FileNotFoundError(f"No consensus FASTA found for {sample_name} in {consensus_dir}")
 
 
-# ---------------------------------------------------------------------------
-# MSA reference discovery
-# ---------------------------------------------------------------------------
+def get_msa_reference(config):
+    for key in ("msa_reference", "msa_ref", "MSA_reference"):
+        value = get_config_value(config, "module_7_params", key, None)
+        if value:
+            return str(value).strip()
+    return None
+
 
 def resolve_msa_reference_fasta(config, reference):
-    """Locate the FASTA file for the configured MSA reference."""
-    # 1) Direct path to a FASTA file
     if os.path.isfile(reference):
         return reference
-
-    # 2) Module 4 ref_genomes directory (standard pipeline location)
-    ref_dir = get_module_4_ref_genomes_dir(config)
+    # Fallback to module 4 ref_genomes dir
+    ref_dir = os.path.join(config.cross_module_params["output_dir"], "module_4", "ref_genomes")
     for ext in (".fasta", ".fa", ".fna"):
         candidate = os.path.join(ref_dir, f"{reference}{ext}")
         if os.path.isfile(candidate):
             return candidate
-
-    raise FileNotFoundError(
-        f"MSA reference FASTA not found for '{reference}'. Expected a direct path or a file at "
-        f"{os.path.join(ref_dir, reference + '.fasta')}."
-    )
+    raise FileNotFoundError(f"MSA reference FASTA not found for '{reference}'.")
 
 
 def load_reference_record(config, reference):
-    """Load the MSA reference as a single SeqRecord labelled with its accession."""
     fasta_path = resolve_msa_reference_fasta(config, reference)
     records = list(SeqIO.parse(fasta_path, "fasta"))
     if not records:
         raise FileNotFoundError(f"MSA reference FASTA contains no records: {fasta_path}")
-    if len(records) > 1:
-        print(f"[WARN]: MSA reference FASTA contains {len(records)} records; using the first.")
-
     record = records[0]
     record.id = reference.replace(" ", "_")
     record.description = ""
@@ -161,7 +144,7 @@ def load_reference_record(config, reference):
 
 
 # ---------------------------------------------------------------------------
-# MAFFT / trimming / FastTree workflow
+# MAFFT / FastTree workflow
 # ---------------------------------------------------------------------------
 
 def run_mafft_alignment(config, input_fasta, aligned_fasta, threads):
@@ -174,7 +157,6 @@ def run_mafft_alignment(config, input_fasta, aligned_fasta, threads):
 
 
 def trim_alignment_ends(alignment_file, trimmed_file):
-    """Trim terminal columns with gaps or Ns across all sequences."""
     print("[TRIMMING]: Removing terminal 5' and 3' alignment regions containing gaps or missing bases...")
     alignment = AlignIO.read(alignment_file, "fasta")
     num_seqs = len(alignment)
@@ -201,10 +183,7 @@ def trim_alignment_ends(alignment_file, trimmed_file):
 
     trimmed_alignment = alignment[:, start_col:end_col]
     AlignIO.write(trimmed_alignment, trimmed_file, "fasta")
-    print(
-        f"[TRIMMING]: Alignment length reduced from {alignment_length} bp to "
-        f"{trimmed_alignment.get_alignment_length()} bp."
-    )
+    print(f"[TRIMMING]: Alignment length reduced from {alignment_length} bp to {trimmed_alignment.get_alignment_length()} bp.")
 
 
 def run_fasttree_phylogeny(config, trimmed_fasta, tree_output_file):
@@ -217,7 +196,6 @@ def run_fasttree_phylogeny(config, trimmed_fasta, tree_output_file):
 
 
 def run_phylogeny_workflow(config, records, output_dir, threads, filenames, label):
-    """Run the full MAFFT -> trim -> FastTree workflow for one set of sequences."""
     combined_fasta = os.path.join(output_dir, filenames["combined"])
     aligned_fasta = os.path.join(output_dir, filenames["aligned"])
     trimmed_fasta = os.path.join(output_dir, filenames["trimmed"])
@@ -236,12 +214,14 @@ def run_phylogeny_workflow(config, records, output_dir, threads, filenames, labe
 # Main workflow
 # ---------------------------------------------------------------------------
 
-def write_analysis_metadata(output_dir, samples, analysis_name, msa_reference=None, ref_tree_built=False):
+def write_analysis_metadata(output_dir, samples, analysis_name, consensus_source, msa_reference=None, ref_tree_built=False):
+    """Write metadata JSON. Fixed to accept consensus_source directly to avoid NameError."""
     metadata_path = os.path.join(output_dir, "analysis_metadata.json")
     payload = {
         "analysis_name": analysis_name,
         "input_samples": samples,
         "module": "module_7_tree_build",
+        "consensus_source": consensus_source,
         "msa_reference": msa_reference,
         "reference_included_tree": ref_tree_built,
     }
@@ -251,7 +231,7 @@ def write_analysis_metadata(output_dir, samples, analysis_name, msa_reference=No
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a phylogeny from the module 6 polished consensus outputs.")
+    parser = argparse.ArgumentParser(description="Build a phylogeny from consensus outputs.")
     parser.add_argument("--config", required=True, help="Path to the config Python file.")
     args = parser.parse_args()
 
@@ -266,15 +246,21 @@ def main():
         get_config_value(config, "module_7_params", "threads", config.cross_module_params.get("threads", 8))
     )
     msa_reference = get_msa_reference(config)
+    consensus_source = get_config_value(config, "module_7_params", "consensus_source", "module_6")
 
     output_dir = get_module_7_dir(config)
     os.makedirs(output_dir, exist_ok=True)
-    print(f"\nStarting module_7_tree_build...\nConfig: {args.config}\nAnalysis: {analysis_name}\nOutput: {output_dir}\n")
+    
+    print(f"\nStarting module_7_tree_build...")
+    print(f"Config: {args.config}")
+    print(f"Consensus Source: {consensus_source}")
+    print(f"Analysis: {analysis_name}")
+    print(f"Output: {output_dir}\n")
 
     records = []
     for sample_name in input_samples:
         try:
-            fasta_path = find_polished_fasta(config, sample_name)
+            fasta_path = find_consensus_fasta(config, sample_name)
             sample_records = list(SeqIO.parse(fasta_path, "fasta"))
             if not sample_records:
                 print(f"[WARN]: No records found in {fasta_path}; skipping.")
@@ -329,7 +315,8 @@ def main():
     else:
         print("[REF]: No 'msa_reference' configured in module_7_params; skipping reference-included MSA/tree.")
 
-    write_analysis_metadata(output_dir, input_samples, analysis_name, msa_reference, ref_tree_built)
+    # Pass consensus_source explicitly to avoid NameError
+    write_analysis_metadata(output_dir, input_samples, analysis_name, consensus_source, msa_reference, ref_tree_built)
     print("\n[module_7_tree_build] Finished all samples.")
 
 

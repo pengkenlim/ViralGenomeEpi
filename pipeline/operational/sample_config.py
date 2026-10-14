@@ -167,6 +167,23 @@ module_6_params = {
     # CheckV database directory.
 }
 
+module_6b_params = {
+    "threads": 8,
+    "minimap2_bin_path": "minimap2",
+    "samtools_bin_path": "samtools",
+    "ivar_bin_path": "ivar",
+    "checkv_bin_path": "checkv",
+    "checkv_db_dir": "/path/to/your/checkv/db",  # Optional: path to checkv database
+    "ivar_min_quality": 20,
+    "ivar_min_freq": 0.5,
+    "ivar_min_depth": 10,
+    # Map sample names to their specific reference genome paths
+    "reference_genomes": {
+        "SRR34884179": "/media/mngs/48TBRAID5HDD/20261008_230815_Renamed_Out_2/module_4/ref_genomes/GCF_000855545.1.fasta",
+        "SRR34884178": "/media/mngs/48TBRAID5HDD/20261008_230815_Renamed_Out_2/module_4/ref_genomes/GCF_000855545.1.fasta",
+        # Add other samples as needed. Samples not listed here will be skipped by Module 6B.
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Module 7: Multiple sequence alignment and phylogeny building
@@ -188,6 +205,11 @@ module_7_params = {
     # Subset of samples to include in this independent phylogeny analysis.
     "analysis_name": "RSV_group1",
     # Output directory name under module_7, e.g. output/module_7/RSV_group1.
+    
+    # NEW: Choose "module_6" for de novo polished consensus, or "module_6b" for direct mapping consensus
+    "consensus_source": "module_6b", 
+    # Optional: Reference for outgroup rooting
+    "msa_reference": "GCF_000856445.1", 
 }
 
 
